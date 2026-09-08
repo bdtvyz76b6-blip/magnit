@@ -1,10 +1,17 @@
 import os
+import time
 import base64
 import threading
-import time
-import requests
+from datetime import datetime, timezone
 
+import requests
 from dotenv import load_dotenv
+
+from database import (
+    get_user,
+    save_subscription_link,
+    save_subscription_content,
+)
 
 load_dotenv()
 
@@ -13,626 +20,71 @@ load_dotenv()
 # CONFIG
 # ============================================================
 
-GITHUB_API = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_OWNER = os.getenv("GITHUB_OWNER", "bdtvyz76b6-blip").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "magnit").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
+GITHUB_USERS_PATH = os.getenv("GITHUB_USERS_PATH", "users").strip("/")
 
-GITHUB_TOKEN = os.getenv(
-    "GITHUB_TOKEN",
-    "",
-)
+SERVERS_FILE = os.getenv("SERVERS_FILE", "servers.txt")
+NO_SERVERS_FILE = os.getenv("NO_SERVERS_FILE", "no_servers.txt")
 
-GITHUB_OWNER = os.getenv(
-    "GITHUB_OWNER",
-    "bdtvyz76b6-blip",
-)
-
-GITHUB_REPO = os.getenv(
-    "GITHUB_REPO",
-    "magnit",
-)
-
-GITHUB_BRANCH = os.getenv(
-    "GITHUB_BRANCH",
-    "main",
-)
-
-GITHUB_USERS_PATH = os.getenv(
-    "GITHUB_USERS_PATH",
-    "users",
-).strip("/")
-
-SERVERS_FILE = os.getenv(
-    "SERVERS_FILE",
-    "servers.txt",
-)
-
-NO_SERVERS_FILE = os.getenv(
-    "NO_SERVERS_FILE",
-    "",
-)
-
-AUTO_SYNC_ENABLED = (
-    os.getenv(
-        "AUTO_SYNC_ENABLED",
-        "true",
-    ).lower()
-    in ("1", "true", "yes", "on")
+PROFILE_TITLE = os.getenv(
+    "PROFILE_TITLE",
+    "𝗦𝗨𝗕 - 𝗠𝗔𝗚𝗡𝗜𝗧 𝗩𝗣𝗡 🧲",
 )
 
 try:
+    PROFILE_UPDATE_INTERVAL = int(
+        os.getenv("PROFILE_UPDATE_INTERVAL", "1")
+    )
+except ValueError:
+    PROFILE_UPDATE_INTERVAL = 1
+
+TRAFFIC_TOTAL = os.getenv("TRAFFIC_TOTAL", "0")
+TRAFFIC_UPLOAD = os.getenv("TRAFFIC_UPLOAD", "0")
+TRAFFIC_DOWNLOAD = os.getenv("TRAFFIC_DOWNLOAD", "0")
+
+HIDE_SETTINGS = os.getenv("HIDE_SETTINGS", "1")
+
+try:
+    AUTO_SYNC_ENABLED = int(
+        os.getenv("AUTO_SYNC_ENABLED", "1")
+    )
+except ValueError:
+    AUTO_SYNC_ENABLED = 1
+
+try:
     AUTO_SYNC_INTERVAL = int(
-        os.getenv(
-            "AUTO_SYNC_INTERVAL",
-            "600",
-        )
+        os.getenv("AUTO_SYNC_INTERVAL", "600")
     )
 except ValueError:
     AUTO_SYNC_INTERVAL = 600
 
 
-PROFILE_TITLE = os.getenv(
-    "PROFILE_TITLE",
-    "Магнит VPN",
-)
-
-try:
-    PROFILE_UPDATE_INTERVAL = int(
-        os.getenv(
-            "PROFILE_UPDATE_INTERVAL",
-            "6",
-        )
-    )
-except ValueError:
-    PROFILE_UPDATE_INTERVAL = 6
-
-
-try:
-    TRAFFIC_TOTAL = int(
-        os.getenv(
-            "TRAFFIC_TOTAL",
-            "0",
-        )
-    )
-except ValueError:
-    TRAFFIC_TOTAL = 0
-
-
-try:
-    TRAFFIC_UPLOAD = int(
-        os.getenv(
-            "TRAFFIC_UPLOAD",
-            "0",
-        )
-    )
-except ValueError:
-    TRAFFIC_UPLOAD = 0
-
-
-try:
-    TRAFFIC_DOWNLOAD = int(
-        os.getenv(
-            "TRAFFIC_DOWNLOAD",
-            "0",
-        )
-    )
-except ValueError:
-    TRAFFIC_DOWNLOAD = 0
-
-
-HIDE_SETTINGS = (
-    os.getenv(
-        "HIDE_SETTINGS",
-        "true",
-    ).lower()
-    in ("1", "true", "yes", "on")
-)
-
-
-USER_AGENT = "magnit-vpn/1.0"
-
-
 # ============================================================
-# DATABASE
+# GITHUB
 # ============================================================
 
-from database import (
-    get_user,
-    get_all_users,
-    save_subscription_content,
-    save_subscription_link,
-    build_subscription_link,
-    get_nodes,
-)
+GITHUB_API = "https://api.github.com"
 
-
-# ============================================================
-# ASCII
-# ============================================================
-
-def safe_ascii(value):
-
-    if value is None:
-        return ""
-
-    return (
-        str(value)
-        .strip()
-        .encode(
-            "ascii",
-            "ignore",
-        )
-        .decode("ascii")
-    )
-
-
-# ============================================================
-# GITHUB HEADERS
-# ============================================================
 
 def github_headers():
-
-    headers = {
-        "Accept": (
-            "application/vnd.github+json"
-        ),
-        "X-GitHub-Api-Version":
-            "2022-11-28",
-        "User-Agent":
-            USER_AGENT,
-    }
-
-    token = safe_ascii(
-        GITHUB_TOKEN
-    )
-
-    token = token.strip(
-        "\"' "
-    )
-
-    if token:
-        headers["Authorization"] = (
-            f"Bearer {token}"
-        )
-
-    return headers
-
-
-# ============================================================
-# GITHUB PATH
-# ============================================================
-
-def github_file_path(
-    user_id,
-):
-    return (
-        f"{GITHUB_USERS_PATH}/"
-        f"{int(user_id)}.txt"
-    )
-
-
-def github_file_url(
-    path,
-):
-    path = str(path).strip().lstrip("/")
-
-    return (
-        f"{GITHUB_API}/repos/"
-        f"{GITHUB_OWNER}/"
-        f"{GITHUB_REPO}/contents/"
-        f"{path}"
-        f"?ref={GITHUB_BRANCH}"
-    )
-
-
-# ============================================================
-# LOAD GITHUB FILE
-# ============================================================
-
-def load_github_file(
-    filename,
-):
-
-    url = github_file_url(
-        filename
-    )
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=github_headers(),
-            timeout=20,
-        )
-
-    except requests.RequestException as e:
-
-        print(
-            f"[GITHUB] request error: {e}"
-        )
-
-        return ""
-
-
-    if response.status_code == 404:
-
-        print(
-            f"[GITHUB] {filename}: 404"
-        )
-
-        return ""
-
-
-    if response.status_code != 200:
-
-        print(
-            f"[GITHUB] {filename}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:300]}"
-        )
-
-        return ""
-
-
-    try:
-
-        data = response.json()
-
-    except Exception as e:
-
-        print(
-            f"[GITHUB] JSON error: {e}"
-        )
-
-        return ""
-
-
-    content = data.get(
-        "content",
-        "",
-    )
-
-    if not content:
-        return ""
-
-
-    try:
-
-        content = (
-            content
-            .replace("\n", "")
-            .replace("\r", "")
-        )
-
-        decoded = base64.b64decode(
-            content
-        )
-
-        return decoded.decode(
-            "utf-8"
-        )
-
-    except Exception as e:
-
-        print(
-            f"[GITHUB] decode error: {e}"
-        )
-
-        return ""
-
-
-# ============================================================
-# LOAD SERVERS
-# ============================================================
-
-def clean_servers(content):
-
-    if not content:
-        return []
-
-    result = []
-    seen = set()
-
-    for raw in content.splitlines():
-
-        line = raw.strip()
-
-        if not line:
-            continue
-
-        if not line.startswith(
-            "vless://"
-        ):
-            continue
-
-        if line in seen:
-            continue
-
-        seen.add(line)
-
-        result.append(line)
-
-    return result
-
-
-def load_servers():
-
-    content = load_github_file(
-        SERVERS_FILE
-    )
-
-    servers = clean_servers(
-        content
-    )
-
-    if servers:
-        return servers
-
-
-    if NO_SERVERS_FILE:
-
-        print(
-            f"[SUBSCRIPTION] "
-            f"{SERVERS_FILE} empty, "
-            f"trying {NO_SERVERS_FILE}"
-        )
-
-        fallback = load_github_file(
-            NO_SERVERS_FILE
-        )
-
-        return clean_servers(
-            fallback
-        )
-
-    return []
-
-
-# ============================================================
-# HAPP HEADERS
-# ============================================================
-
-def build_happ_headers(
-    user=None,
-):
-
-    headers = []
-
-    if PROFILE_TITLE:
-
-        headers.append(
-            f"#profile-title: "
-            f"{PROFILE_TITLE}"
-        )
-
-
-    headers.append(
-        "#profile-update-interval: "
-        f"{PROFILE_UPDATE_INTERVAL}"
-    )
-
-
-    upload = TRAFFIC_UPLOAD
-    download = TRAFFIC_DOWNLOAD
-    total = TRAFFIC_TOTAL
-
-
-    headers.append(
-        "#subscription-userinfo: "
-        f"upload={upload};"
-        f"download={download};"
-        f"total={total}"
-    )
-
-
-    if HIDE_SETTINGS:
-
-        headers.append(
-            "#profile-web-page-url:"
-        )
-
-        headers.append(
-            "#profile-profile-web-page-url:"
-        )
-
-
-    return headers
-
-
-# ============================================================
-# SUBSCRIPTION CONTENT
-# ============================================================
-
-def build_subscription_content(
-    user=None,
-):
-
-    servers = load_servers()
-
-    lines = []
-
-    lines.extend(
-        build_happ_headers(user)
-    )
-
-    if servers:
-
-        lines.append("")
-
-        lines.extend(
-            servers
-        )
-
-    content = "\n".join(
-        lines
-    ).strip()
-
-    if not content:
-        return ""
-
-    return content + "\n"
-
-
-# ============================================================
-# GITHUB UPDATE / CREATE
-# ============================================================
-
-def upload_user_subscription(
-    user_id,
-    content,
-):
-
-    if not GITHUB_TOKEN:
-
-        print(
-            "[GITHUB] "
-            "GITHUB_TOKEN is missing"
-        )
-
-        return False
-
-
-    path = github_file_path(
-        user_id
-    )
-
-    url = github_file_url(
-        path
-    )
-
-
-    encoded = base64.b64encode(
-        content.encode("utf-8")
-    ).decode("ascii")
-
-
-    sha = None
-
-
-    # ========================================================
-    # GET EXISTING FILE
-    # ========================================================
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=github_headers(),
-            timeout=20,
-        )
-
-    except requests.RequestException as e:
-
-        print(
-            f"[GITHUB] GET error "
-            f"user={user_id}: {e}"
-        )
-
-        return False
-
-
-    if response.status_code == 200:
-
-        try:
-
-            data = response.json()
-
-            sha = data.get(
-                "sha"
-            )
-
-        except Exception as e:
-
-            print(
-                f"[GITHUB] "
-                f"SHA error: {e}"
-            )
-
-            return False
-
-
-    elif response.status_code != 404:
-
-        print(
-            f"[GITHUB] "
-            f"GET user={user_id}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:500]}"
-        )
-
-        return False
-
-
-    # ========================================================
-    # PUT
-    # ========================================================
-
-    payload = {
-        "message":
-            f"Update subscription "
-            f"for {user_id}",
-
-        "content":
-            encoded,
-
-        "branch":
-            GITHUB_BRANCH,
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
     }
 
 
-    if sha:
-        payload["sha"] = sha
+def github_file_path(user_id):
+    return f"{GITHUB_USERS_PATH}/{int(user_id)}.txt"
 
 
-    try:
-
-        response = requests.put(
-            url,
-            headers=github_headers(),
-            json=payload,
-            timeout=30,
-        )
-
-    except requests.RequestException as e:
-
-        print(
-            f"[GITHUB] PUT error "
-            f"user={user_id}: {e}"
-        )
-
-        return False
-
-
-    if response.status_code not in (
-        200,
-        201,
-    ):
-
-        print(
-            f"[GITHUB] PUT user={user_id}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:1000]}"
-        )
-
-        return False
-
-
-    print(
-        f"[GITHUB] "
-        f"users/{user_id}.txt updated"
-    )
-
-    return True
-
-
-# ============================================================
-# RAW URL
-# ============================================================
-
-def build_github_subscription_link(
-    user_id,
-):
-
+def build_github_subscription_url(user_id):
     return (
-        "https://raw.githubusercontent.com/"
+        f"https://raw.githubusercontent.com/"
         f"{GITHUB_OWNER}/"
         f"{GITHUB_REPO}/"
         f"{GITHUB_BRANCH}/"
@@ -641,390 +93,585 @@ def build_github_subscription_link(
 
 
 # ============================================================
-# SYNC USER
+# SERVERS
 # ============================================================
 
-def sync_user(
-    user_id,
-):
+def read_lines(filename):
+    if not filename:
+        return []
 
-    user = get_user(
-        user_id
-    )
+    if not os.path.exists(filename):
+        return []
 
-    if not user:
-
-        print(
-            f"[SUBSCRIPTION] "
-            f"user {user_id} not found"
-        )
-
-        return None
-
-
-    token = user.get(
-        "token"
-    )
-
-    if not token:
-
-        print(
-            f"[SUBSCRIPTION] "
-            f"user {user_id}: token missing"
-        )
-
-        return None
-
+    result = []
 
     try:
+        with open(
+            filename,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            for line in file:
+                line = line.strip()
 
-        content = build_subscription_content(
-            user
-        )
+                if not line:
+                    continue
+
+                if line.startswith("#"):
+                    continue
+
+                result.append(line)
 
     except Exception as e:
-
         print(
-            f"[SUBSCRIPTION] "
-            f"build error "
-            f"user={user_id}: {e}"
+            f"[SUBSCRIPTION] Ошибка чтения "
+            f"{filename}: {e}"
         )
 
-        return None
+    return result
 
 
-    if not content.strip():
+def get_servers():
+    servers = []
 
-        print(
-            f"[SUBSCRIPTION] "
-            f"empty subscription "
-            f"user={user_id}"
-        )
-
-        return None
-
-
-    # ========================================================
-    # GITHUB
-    # ========================================================
-
-    github_link = (
-        build_github_subscription_link(
-            user_id
-        )
+    servers.extend(
+        read_lines(SERVERS_FILE)
     )
 
-
-    if not upload_user_subscription(
-        user_id,
-        content,
-    ):
-        return None
-
-
-    # ========================================================
-    # DATABASE
-    # ========================================================
-
-    try:
-
-        save_subscription_content(
-            user_id,
-            content,
+    if NO_SERVERS_FILE:
+        servers.extend(
+            read_lines(NO_SERVERS_FILE)
         )
 
-        # Для кабинета теперь сохраняем
-        # именно прямую GitHub-ссылку.
+    # Убираем дубликаты, сохраняя порядок
+    unique = []
 
-        save_subscription_link(
-            user_id,
-            github_link,
-        )
+    for server in servers:
+        if server not in unique:
+            unique.append(server)
 
-    except Exception as e:
+    return unique
 
+
+# ============================================================
+# SUBSCRIPTION CONTENT
+# ============================================================
+
+def build_subscription_content(user_id):
+    """
+    Создаёт содержимое пользовательской подписки.
+
+    Формат:
+    обычные VLESS-ссылки по одной на строку.
+    """
+
+    servers = get_servers()
+
+    if not servers:
         print(
-            f"[SUBSCRIPTION] "
-            f"database error "
-            f"user={user_id}: {e}"
+            f"[SUBSCRIPTION] Для пользователя "
+            f"{user_id} нет серверов."
         )
 
+        return ""
+
+    return "\n".join(servers)
+
+
+# ============================================================
+# GITHUB GET
+# ============================================================
+
+def get_github_file(user_id):
+    """
+    Получает существующий файл пользователя.
+
+    Возвращает:
+        {
+            "sha": "...",
+            "content": "..."
+        }
+
+    или None.
+    """
+
+    if not GITHUB_TOKEN:
+        print(
+            "[GITHUB] GITHUB_TOKEN не задан."
+        )
         return None
 
+    path = github_file_path(user_id)
 
-    return {
-        "user_id": user_id,
-        "token": token,
-        "link": github_link,
-        "content": content,
+    url = (
+        f"{GITHUB_API}/repos/"
+        f"{GITHUB_OWNER}/"
+        f"{GITHUB_REPO}/"
+        f"/contents/{path}"
+    )
+
+    params = {
+        "ref": GITHUB_BRANCH,
     }
 
-
-# ============================================================
-# ENSURE
-# ============================================================
-
-def ensure_subscription(
-    user_id,
-):
-
-    user = get_user(
-        user_id
-    )
-
-    if not user:
-        return ""
-
-
-    token = user.get(
-        "token"
-    )
-
-    if not token:
-        return ""
-
-
-    github_link = (
-        build_github_subscription_link(
-            user_id
-        )
-    )
-
-
-    # Если контент уже есть,
-    # всё равно возвращаем GitHub URL.
-
-    content = (
-        user.get(
-            "subscription_content",
-            "",
-        )
-        or ""
-    )
-
-
-    if content.strip():
-
-        try:
-
-            save_subscription_link(
-                user_id,
-                github_link,
-            )
-
-        except Exception as e:
-
-            print(
-                f"[SUBSCRIPTION] "
-                f"link save error "
-                f"user={user_id}: {e}"
-            )
-
-        return github_link
-
-
-    result = sync_user(
-        user_id
-    )
-
-    if not result:
-        return ""
-
-    return result["link"]
-
-
-# ============================================================
-# SYNC ALL
-# ============================================================
-
-def sync_all_users():
-
-    users = get_all_users()
-
-    success = 0
-
-    for user in users:
-
-        try:
-
-            user_id = int(
-                user["user_id"]
-            )
-
-            if sync_user(
-                user_id
-            ):
-                success += 1
-
-        except Exception as e:
-
-            print(
-                "[SUBSCRIPTION] "
-                f"sync error "
-                f"user={user.get('user_id')}: {e}"
-            )
-
-
-    print(
-        "[SUBSCRIPTION] "
-        f"sync complete: "
-        f"{success}/{len(users)}"
-    )
-
-    return success
-
-
-def sync_all_active_users():
-
-    return sync_all_users()
-
-
-def force_sync():
-
-    return sync_all_users()
-
-
-# ============================================================
-# GITHUB CHECK
-# ============================================================
-
-def check_github_connection():
-
     try:
-
-        url = (
-            f"{GITHUB_API}/repos/"
-            f"{GITHUB_OWNER}/"
-            f"{GITHUB_REPO}"
-        )
-
         response = requests.get(
             url,
             headers=github_headers(),
-            timeout=15,
+            params=params,
+            timeout=20,
         )
 
-        if response.status_code == 200:
-            return True
-
-
+    except Exception as e:
         print(
-            f"[GITHUB] "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:500]}"
+            f"[GITHUB] Ошибка GET: {e}"
         )
+        return None
 
-        return False
+    if response.status_code == 404:
+        return None
 
-    except requests.RequestException as e:
-
+    if response.status_code != 200:
         print(
-            f"[GITHUB] "
-            f"connection error: {e}"
+            "[GITHUB] GET ошибка:",
+            response.status_code,
+            response.text[:500],
+        )
+        return None
+
+    try:
+        data = response.json()
+
+        encoded = data.get("content", "")
+        encoded = encoded.replace("\n", "")
+
+        content = base64.b64decode(
+            encoded
+        ).decode(
+            "utf-8",
+            errors="replace",
         )
 
-        return False
+        return {
+            "sha": data.get("sha"),
+            "content": content,
+        }
+
+    except Exception as e:
+        print(
+            f"[GITHUB] Ошибка обработки файла: {e}"
+        )
+        return None
 
 
 # ============================================================
-# SERVER INFO
+# GITHUB CREATE / UPDATE
 # ============================================================
 
-def get_servers_info():
+def upload_github_file(user_id, content):
+    """
+    Реально создаёт или обновляет:
 
-    servers = load_servers()
+    users/{user_id}.txt
 
-    return {
-        "count": len(servers),
-        "servers": servers,
+    в GitHub.
+    """
+
+    if not GITHUB_TOKEN:
+        print(
+            "[GITHUB] ОШИБКА: "
+            "GITHUB_TOKEN не задан."
+        )
+        return False
+
+    path = github_file_path(user_id)
+
+    url = (
+        f"{GITHUB_API}/repos/"
+        f"{GITHUB_OWNER}/"
+        f"{GITHUB_REPO}/"
+        f"/contents/{path}"
+    )
+
+    # --------------------------------------------------------
+    # Сначала проверяем, существует ли файл
+    # --------------------------------------------------------
+
+    existing = get_github_file(user_id)
+
+    encoded_content = base64.b64encode(
+        content.encode("utf-8")
+    ).decode("utf-8")
+
+    payload = {
+        "message": (
+            f"Update subscription "
+            f"for user {user_id}"
+        ),
+        "content": encoded_content,
+        "branch": GITHUB_BRANCH,
     }
+
+    # Если файл уже существует —
+    # обязательно передаём SHA.
+    if existing and existing.get("sha"):
+        payload["sha"] = existing["sha"]
+
+    try:
+        response = requests.put(
+            url,
+            headers=github_headers(),
+            json=payload,
+            timeout=30,
+        )
+
+    except Exception as e:
+        print(
+            f"[GITHUB] Ошибка PUT: {e}"
+        )
+        return False
+
+    # --------------------------------------------------------
+    # Успех
+    # --------------------------------------------------------
+
+    if response.status_code in (200, 201):
+        print(
+            f"[GITHUB] Файл успешно "
+            f"{'обновлён' if existing else 'создан'}: "
+            f"{path}"
+        )
+
+        return True
+
+    # --------------------------------------------------------
+    # Если SHA устарел — повторяем запрос
+    # --------------------------------------------------------
+
+    if response.status_code == 409:
+        print(
+            "[GITHUB] Конфликт SHA. "
+            "Получаем новый SHA..."
+        )
+
+        latest = get_github_file(user_id)
+
+        if latest and latest.get("sha"):
+            payload["sha"] = latest["sha"]
+
+            try:
+                retry = requests.put(
+                    url,
+                    headers=github_headers(),
+                    json=payload,
+                    timeout=30,
+                )
+
+                if retry.status_code in (
+                    200,
+                    201,
+                ):
+                    print(
+                        f"[GITHUB] Файл обновлён "
+                        f"после повторной попытки: "
+                        f"{path}"
+                    )
+
+                    return True
+
+                print(
+                    "[GITHUB] Повторный PUT ошибка:",
+                    retry.status_code,
+                    retry.text[:500],
+                )
+
+            except Exception as e:
+                print(
+                    f"[GITHUB] Ошибка повторного PUT: {e}"
+                )
+
+        return False
+
+    print(
+        "[GITHUB] PUT ошибка:",
+        response.status_code,
+        response.text[:1000],
+    )
+
+    return False
+
+
+# ============================================================
+# SYNC USER
+# ============================================================
+
+def sync_user(user_id):
+    """
+    Полностью синхронизирует подписку пользователя:
+
+    1. Берёт серверы из servers.txt
+    2. Создаёт content
+    3. Создаёт/обновляет users/{id}.txt
+    4. Сохраняет Raw URL в БД
+
+    Возвращает Raw URL или None.
+    """
+
+    user_id = int(user_id)
+
+    user = get_user(user_id)
+
+    if not user:
+        print(
+            f"[SUBSCRIPTION] Пользователь "
+            f"{user_id} не найден."
+        )
+        return None
+
+    content = build_subscription_content(
+        user_id
+    )
+
+    if not content:
+        print(
+            f"[SUBSCRIPTION] Пустая подписка "
+            f"для {user_id}. GitHub не обновляем."
+        )
+        return None
+
+    # --------------------------------------------------------
+    # Реальная загрузка в GitHub
+    # --------------------------------------------------------
+
+    success = upload_github_file(
+        user_id,
+        content,
+    )
+
+    if not success:
+        print(
+            f"[SUBSCRIPTION] GitHub sync "
+            f"не удался для {user_id}"
+        )
+        return None
+
+    # --------------------------------------------------------
+    # Raw URL
+    # --------------------------------------------------------
+
+    raw_url = build_github_subscription_url(
+        user_id
+    )
+
+    # Сохраняем URL в БД
+    save_subscription_link(
+        user_id,
+        raw_url,
+    )
+
+    # Сохраняем содержимое в БД
+    save_subscription_content(
+        user_id,
+        content,
+    )
+
+    print(
+        f"[SUBSCRIPTION] {user_id} → {raw_url}"
+    )
+
+    return raw_url
+
+
+# ============================================================
+# ENSURE SUBSCRIPTION
+# ============================================================
+
+def ensure_subscription(user_id):
+    """
+    Проверяет пользовательскую подписку.
+
+    Если файла нет — создаёт.
+    Если есть — оставляет существующий,
+    если содержимое актуально.
+
+    Возвращает Raw GitHub URL.
+    """
+
+    user_id = int(user_id)
+
+    user = get_user(user_id)
+
+    if not user:
+        return None
+
+    raw_url = build_github_subscription_url(
+        user_id
+    )
+
+    # --------------------------------------------------------
+    # Проверяем GitHub
+    # --------------------------------------------------------
+
+    existing = get_github_file(user_id)
+
+    if existing:
+        github_content = existing.get(
+            "content",
+            "",
+        )
+
+        current_content = (
+            build_subscription_content(
+                user_id
+            )
+        )
+
+        # Если содержимое изменилось —
+        # обновляем GitHub.
+        if (
+            current_content
+            and github_content.strip()
+            != current_content.strip()
+        ):
+            print(
+                f"[SUBSCRIPTION] "
+                f"Изменения серверов для {user_id}, "
+                f"обновляем GitHub..."
+            )
+
+            result = upload_github_file(
+                user_id,
+                current_content,
+            )
+
+            if not result:
+                return None
+
+            save_subscription_content(
+                user_id,
+                current_content,
+            )
+
+        else:
+            save_subscription_content(
+                user_id,
+                github_content,
+            )
+
+        save_subscription_link(
+            user_id,
+            raw_url,
+        )
+
+        return raw_url
+
+    # --------------------------------------------------------
+    # Файла нет → создаём
+    # --------------------------------------------------------
+
+    print(
+        f"[SUBSCRIPTION] Файла пользователя "
+        f"{user_id} нет. Создаём..."
+    )
+
+    return sync_user(user_id)
 
 
 # ============================================================
 # AUTO SYNC
 # ============================================================
 
-_sync_thread = None
-
-
-def _auto_sync_worker():
-
+def auto_sync_loop():
     print(
-        "[SUBSCRIPTION] "
-        "auto sync started "
-        f"interval={AUTO_SYNC_INTERVAL}s"
+        "[AUTO SYNC] Запущена автоматическая "
+        "синхронизация."
     )
 
-
     while True:
-
         try:
+            from database import get_all_users
 
-            sync_all_users()
+            users = get_all_users()
+
+            for user in users:
+                try:
+                    user_id = user["user_id"]
+
+                    # Не синхронизируем заблокированных
+                    if int(
+                        user.get("blocked", 0) or 0
+                    ):
+                        continue
+
+                    # Только пользователи с подпиской
+                    if not user.get(
+                        "subscription_until"
+                    ):
+                        continue
+
+                    sync_user(user_id)
+
+                except Exception as e:
+                    print(
+                        f"[AUTO SYNC] Ошибка пользователя: "
+                        f"{e}"
+                    )
 
         except Exception as e:
-
             print(
-                "[SUBSCRIPTION] "
-                f"auto sync error: {e}"
+                f"[AUTO SYNC] Общая ошибка: {e}"
             )
-
-
-        try:
-
-            interval = int(
-                AUTO_SYNC_INTERVAL
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            interval = 600
-
 
         time.sleep(
-            max(
-                60,
-                interval,
-            )
+            max(60, AUTO_SYNC_INTERVAL)
         )
 
 
 def start_auto_sync():
-
-    global _sync_thread
-
-
     if not AUTO_SYNC_ENABLED:
-
         print(
-            "[SUBSCRIPTION] "
-            "auto sync disabled"
+            "[AUTO SYNC] Отключена."
         )
-
         return
 
-
-    if (
-        _sync_thread
-        and
-        _sync_thread.is_alive()
-    ):
-        return
-
-
-    _sync_thread = threading.Thread(
-        target=_auto_sync_worker,
+    thread = threading.Thread(
+        target=auto_sync_loop,
         daemon=True,
-        name="subscription-sync",
+        name="subscription-auto-sync",
     )
 
-    _sync_thread.start()
-
+    thread.start()
 
     print(
-        "[SUBSCRIPTION] "
-        "auto sync thread started"
+        "[AUTO SYNC] Поток запущен."
+    )
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+    print("====================================")
+    print(" MAGNIT VPN SUBSCRIPTION")
+    print("====================================")
+    print(
+        "GitHub:",
+        f"{GITHUB_OWNER}/{GITHUB_REPO}",
+    )
+    print(
+        "Branch:",
+        GITHUB_BRANCH,
+    )
+    print(
+        "Path:",
+        GITHUB_USERS_PATH,
+    )
+    print(
+        "Token:",
+        "SET" if GITHUB_TOKEN else "NOT SET",
+    )
+    print(
+        "Servers:",
+        len(get_servers()),
     )
