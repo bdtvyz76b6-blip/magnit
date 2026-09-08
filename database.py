@@ -3,7 +3,7 @@ import sqlite3
 import secrets
 import uuid as uuid_lib
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -15,7 +15,14 @@ load_dotenv()
 # НАСТРОЙКИ
 # ============================================================
 
-DB_PATH = os.getenv("DB_PATH", "/data/users.db")
+# Render не разрешает запись напрямую в /data,
+# если Persistent Disk не подключён.
+#
+# Поэтому по умолчанию используем локальную папку проекта.
+DB_PATH = os.getenv(
+    "DB_PATH",
+    "./data/users.db"
+)
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
@@ -36,9 +43,11 @@ def now_moscow_iso():
 
 def parse_datetime(value):
     """
-    Преобразует строку/дату в timezone-aware datetime.
+    Преобразует значение в timezone-aware datetime.
+
     Старые даты без timezone считаются московскими.
     """
+
     if not value:
         return None
 
@@ -47,33 +56,61 @@ def parse_datetime(value):
     else:
         try:
             dt = datetime.fromisoformat(str(value))
-        except (ValueError, TypeError):
+        except (
+            ValueError,
+            TypeError
+        ):
             return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=MOSCOW_TZ)
+        dt = dt.replace(
+            tzinfo=MOSCOW_TZ
+        )
 
     return dt
 
 
 # ============================================================
-# ПОДКЛЮЧЕНИЕ К БД
+# ПОДКЛЮЧЕНИЕ К SQLITE
 # ============================================================
 
 def connect():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+    # Получаем абсолютный путь
+    absolute_path = os.path.abspath(DB_PATH)
+
+    db_dir = os.path.dirname(
+        absolute_path
+    )
+
+    # Создаём папку только если она существует
+    if db_dir:
+        os.makedirs(
+            db_dir,
+            exist_ok=True
+        )
 
     db = sqlite3.connect(
-        DB_PATH,
+        absolute_path,
         timeout=30,
-        check_same_thread=False,
+        check_same_thread=False
     )
 
     db.row_factory = sqlite3.Row
 
     try:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA busy_timeout=30000")
+        db.execute(
+            "PRAGMA journal_mode=WAL"
+        )
+
+        db.execute(
+            "PRAGMA busy_timeout=30000"
+        )
+
+        db.execute(
+            "PRAGMA foreign_keys=ON"
+        )
+
     except Exception:
         pass
 
@@ -81,15 +118,21 @@ def connect():
 
 
 # ============================================================
-# ГЕНЕРАЦИЯ
+# ГЕНЕРАЦИЯ TOKEN / UUID
 # ============================================================
 
 def generate_token(length=32):
-    return secrets.token_urlsafe(length)
+
+    return secrets.token_urlsafe(
+        length
+    )
 
 
 def generate_uuid():
-    return str(uuid_lib.uuid4())
+
+    return str(
+        uuid_lib.uuid4()
+    )
 
 
 # ============================================================
@@ -97,12 +140,17 @@ def generate_uuid():
 # ============================================================
 
 def get_public_url():
+
     try:
+
         from config import PUBLIC_URL
 
         if PUBLIC_URL:
+
             return PUBLIC_URL.rstrip("/")
+
     except Exception:
+
         pass
 
     return os.getenv(
@@ -112,41 +160,46 @@ def get_public_url():
 
 
 def build_subscription_link(token):
-    """
-    Основная ссылка пользователя.
-    """
 
     public_url = get_public_url()
 
-    return f"{public_url}/sub/{token}"
+    return (
+        f"{public_url}/sub/{token}"
+    )
 
 
 # ============================================================
-# ИНИЦИАЛИЗАЦИЯ БД
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ
 # ============================================================
 
 def init_db():
 
     with connect() as db:
 
-        # ----------------------------------------------------
+        # ====================================================
         # USERS
-        # ----------------------------------------------------
+        # ====================================================
 
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
+
                 username TEXT DEFAULT '',
+
                 first_name TEXT DEFAULT '',
 
                 token TEXT DEFAULT '',
+
                 uuid TEXT DEFAULT '',
 
                 subscription TEXT DEFAULT 'none',
+
                 subscription_until TEXT DEFAULT '',
 
                 subscription_link TEXT DEFAULT '',
+
+                subscription_content TEXT DEFAULT '',
 
                 device_limit INTEGER DEFAULT 1,
 
@@ -161,9 +214,9 @@ def init_db():
             """
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # PAYMENTS
-        # ----------------------------------------------------
+        # ====================================================
 
         db.execute(
             """
@@ -173,7 +226,9 @@ def init_db():
                 user_id INTEGER,
 
                 tariff TEXT DEFAULT '',
+
                 stars INTEGER DEFAULT 0,
+
                 days INTEGER DEFAULT 0,
 
                 telegram_charge_id TEXT DEFAULT '',
@@ -185,9 +240,9 @@ def init_db():
             """
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # PROMOCODES
-        # ----------------------------------------------------
+        # ====================================================
 
         db.execute(
             """
@@ -205,9 +260,9 @@ def init_db():
             """
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # NODES
-        # ----------------------------------------------------
+        # ====================================================
 
         db.execute(
             """
@@ -225,9 +280,9 @@ def init_db():
             """
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # DEVICES
-        # ----------------------------------------------------
+        # ====================================================
 
         db.execute(
             """
@@ -250,7 +305,7 @@ def init_db():
         db.commit()
 
         # ====================================================
-        # МИГРАЦИЯ СТАРОЙ БД
+        # МИГРАЦИЯ USERS
         # ====================================================
 
         columns = {
@@ -261,24 +316,54 @@ def init_db():
         }
 
         migrations = {
-            "token": "ALTER TABLE users ADD COLUMN token TEXT DEFAULT ''",
-            "uuid": "ALTER TABLE users ADD COLUMN uuid TEXT DEFAULT ''",
-            "subscription_link": (
-                "ALTER TABLE users "
-                "ADD COLUMN subscription_link TEXT DEFAULT ''"
-            ),
-            "device_limit": (
-                "ALTER TABLE users "
-                "ADD COLUMN device_limit INTEGER DEFAULT 1"
-            ),
-            "blocked": (
-                "ALTER TABLE users "
-                "ADD COLUMN blocked INTEGER DEFAULT 0"
-            ),
-            "notify": (
-                "ALTER TABLE users "
-                "ADD COLUMN notify INTEGER DEFAULT 1"
-            ),
+
+            "token":
+                """
+                ALTER TABLE users
+                ADD COLUMN token TEXT DEFAULT ''
+                """,
+
+            "uuid":
+                """
+                ALTER TABLE users
+                ADD COLUMN uuid TEXT DEFAULT ''
+                """,
+
+            "subscription_link":
+                """
+                ALTER TABLE users
+                ADD COLUMN subscription_link TEXT DEFAULT ''
+                """,
+
+            "subscription_content":
+                """
+                ALTER TABLE users
+                ADD COLUMN subscription_content TEXT DEFAULT ''
+                """,
+
+            "device_limit":
+                """
+                ALTER TABLE users
+                ADD COLUMN device_limit INTEGER DEFAULT 1
+                """,
+
+            "trial_used":
+                """
+                ALTER TABLE users
+                ADD COLUMN trial_used INTEGER DEFAULT 0
+                """,
+
+            "blocked":
+                """
+                ALTER TABLE users
+                ADD COLUMN blocked INTEGER DEFAULT 0
+                """,
+
+            "notify":
+                """
+                ALTER TABLE users
+                ADD COLUMN notify INTEGER DEFAULT 1
+                """
         }
 
         for column, sql in migrations.items():
@@ -286,13 +371,16 @@ def init_db():
             if column not in columns:
 
                 try:
+
                     db.execute(sql)
+
                 except sqlite3.OperationalError:
+
                     pass
 
-        # ----------------------------------------------------
-        # MIGRATION PAYMENTS
-        # ----------------------------------------------------
+        # ====================================================
+        # МИГРАЦИЯ PAYMENTS
+        # ====================================================
 
         payment_columns = {
             row["name"]
@@ -302,26 +390,36 @@ def init_db():
         }
 
         payment_migrations = {
-            "tariff": (
-                "ALTER TABLE payments "
-                "ADD COLUMN tariff TEXT DEFAULT ''"
-            ),
-            "stars": (
-                "ALTER TABLE payments "
-                "ADD COLUMN stars INTEGER DEFAULT 0"
-            ),
-            "days": (
-                "ALTER TABLE payments "
-                "ADD COLUMN days INTEGER DEFAULT 0"
-            ),
-            "telegram_charge_id": (
-                "ALTER TABLE payments "
-                "ADD COLUMN telegram_charge_id TEXT DEFAULT ''"
-            ),
-            "status": (
-                "ALTER TABLE payments "
-                "ADD COLUMN status TEXT DEFAULT 'pending'"
-            ),
+
+            "tariff":
+                """
+                ALTER TABLE payments
+                ADD COLUMN tariff TEXT DEFAULT ''
+                """,
+
+            "stars":
+                """
+                ALTER TABLE payments
+                ADD COLUMN stars INTEGER DEFAULT 0
+                """,
+
+            "days":
+                """
+                ALTER TABLE payments
+                ADD COLUMN days INTEGER DEFAULT 0
+                """,
+
+            "telegram_charge_id":
+                """
+                ALTER TABLE payments
+                ADD COLUMN telegram_charge_id TEXT DEFAULT ''
+                """,
+
+            "status":
+                """
+                ALTER TABLE payments
+                ADD COLUMN status TEXT DEFAULT 'pending'
+                """
         }
 
         for column, sql in payment_migrations.items():
@@ -329,16 +427,24 @@ def init_db():
             if column not in payment_columns:
 
                 try:
+
                     db.execute(sql)
+
                 except sqlite3.OperationalError:
+
                     pass
 
+        db.commit()
+
         # ====================================================
-        # ВОССТАНОВЛЕНИЕ ДАННЫХ
+        # ВОССТАНОВЛЕНИЕ СТАРЫХ USERS
         # ====================================================
 
         users = db.execute(
-            "SELECT * FROM users"
+            """
+            SELECT *
+            FROM users
+            """
         ).fetchall()
 
         for user in users:
@@ -353,15 +459,22 @@ def init_db():
 
             if not token:
 
-                new_token = generate_token()
+                token = generate_token()
 
-                # Проверяем уникальность
                 while db.execute(
-                    "SELECT 1 FROM users WHERE token = ?",
-                    (new_token,)
+                    """
+                    SELECT 1
+                    FROM users
+                    WHERE token = ?
+                    AND user_id != ?
+                    """,
+                    (
+                        token,
+                        user_id
+                    )
                 ).fetchone():
 
-                    new_token = generate_token()
+                    token = generate_token()
 
                 db.execute(
                     """
@@ -369,16 +482,19 @@ def init_db():
                     SET token = ?
                     WHERE user_id = ?
                     """,
-                    (new_token, user_id)
+                    (
+                        token,
+                        user_id
+                    )
                 )
-
-                token = new_token
 
             # ------------------------------------------------
             # UUID
             # ------------------------------------------------
 
-            if not user["uuid"]:
+            current_uuid = user["uuid"]
+
+            if not current_uuid:
 
                 db.execute(
                     """
@@ -400,7 +516,9 @@ def init_db():
 
             if not link:
 
-                link = build_subscription_link(token)
+                link = build_subscription_link(
+                    token
+                )
 
                 db.execute(
                     """
@@ -419,7 +537,11 @@ def init_db():
             # ------------------------------------------------
 
             try:
-                if user["device_limit"] is None:
+
+                device_limit = user["device_limit"]
+
+                if device_limit is None:
+
                     db.execute(
                         """
                         UPDATE users
@@ -428,14 +550,16 @@ def init_db():
                         """,
                         (user_id,)
                     )
+
             except Exception:
+
                 pass
 
         db.commit()
 
 
 # ============================================================
-# USERS
+# СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ
 # ============================================================
 
 def create_user(
@@ -444,20 +568,30 @@ def create_user(
     first_name=""
 ):
 
-    existing = get_user(user_id)
+    existing = get_user(
+        user_id
+    )
 
     if existing:
+
         return existing
+
+    # --------------------------------------------------------
+    # TOKEN
+    # --------------------------------------------------------
 
     token = generate_token()
 
-    # Проверка уникальности токена
     while True:
 
         with connect() as db:
 
             exists = db.execute(
-                "SELECT 1 FROM users WHERE token = ?",
+                """
+                SELECT 1
+                FROM users
+                WHERE token = ?
+                """,
                 (token,)
             ).fetchone()
 
@@ -466,9 +600,25 @@ def create_user(
 
         token = generate_token()
 
+    # --------------------------------------------------------
+    # UUID
+    # --------------------------------------------------------
+
     user_uuid = generate_uuid()
 
-    subscription_link = build_subscription_link(token)
+    # --------------------------------------------------------
+    # SUBSCRIPTION LINK
+    # --------------------------------------------------------
+
+    subscription_link = (
+        build_subscription_link(
+            token
+        )
+    )
+
+    # --------------------------------------------------------
+    # INSERT
+    # --------------------------------------------------------
 
     with connect() as db:
 
@@ -483,13 +633,14 @@ def create_user(
                 subscription,
                 subscription_until,
                 subscription_link,
+                subscription_content,
                 device_limit,
                 trial_used,
                 blocked,
                 notify,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -500,18 +651,25 @@ def create_user(
                 "none",
                 "",
                 subscription_link,
+                "",
                 1,
                 0,
                 0,
                 1,
-                now_moscow_iso(),
+                now_moscow_iso()
             )
         )
 
         db.commit()
 
-    return get_user(user_id)
+    return get_user(
+        user_id
+    )
 
+
+# ============================================================
+# ПОЛУЧИТЬ USER
+# ============================================================
 
 def get_user(user_id):
 
@@ -527,14 +685,20 @@ def get_user(user_id):
         ).fetchone()
 
     if not row:
+
         return None
 
     return dict(row)
 
 
+# ============================================================
+# USER ПО TOKEN
+# ============================================================
+
 def get_user_by_token(token):
 
     if not token:
+
         return None
 
     with connect() as db:
@@ -549,10 +713,15 @@ def get_user_by_token(token):
         ).fetchone()
 
     if not row:
+
         return None
 
     return dict(row)
 
+
+# ============================================================
+# ВСЕ USERS
+# ============================================================
 
 def get_all_users():
 
@@ -566,14 +735,20 @@ def get_all_users():
             """
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
 # ============================================================
 # SUBSCRIPTION LINK
 # ============================================================
 
-def save_subscription_link(user_id, link):
+def save_subscription_link(
+    user_id,
+    link
+):
 
     with connect() as db:
 
@@ -592,36 +767,92 @@ def save_subscription_link(user_id, link):
         db.commit()
 
 
-def get_subscription_link(user_id):
+def get_subscription_link(
+    user_id
+):
 
-    user = get_user(user_id)
+    user = get_user(
+        user_id
+    )
 
     if not user:
+
         return ""
 
-    link = user.get("subscription_link")
+    link = user.get(
+        "subscription_link"
+    )
 
     if link:
-        return link
-
-    token = user.get("token")
-
-    if token:
-
-        link = build_subscription_link(token)
-
-        save_subscription_link(
-            user_id,
-            link
-        )
 
         return link
 
-    return ""
+    token = user.get(
+        "token"
+    )
+
+    if not token:
+
+        return ""
+
+    link = build_subscription_link(
+        token
+    )
+
+    save_subscription_link(
+        user_id,
+        link
+    )
+
+    return link
 
 
 # ============================================================
-# SUBSCRIPTION
+# SUBSCRIPTION CONTENT
+# ============================================================
+
+def save_subscription_content(
+    user_id,
+    content
+):
+
+    with connect() as db:
+
+        db.execute(
+            """
+            UPDATE users
+            SET subscription_content = ?
+            WHERE user_id = ?
+            """,
+            (
+                content or "",
+                user_id
+            )
+        )
+
+        db.commit()
+
+
+def get_subscription_content(
+    user_id
+):
+
+    user = get_user(
+        user_id
+    )
+
+    if not user:
+
+        return ""
+
+    return user.get(
+        "subscription_content",
+        ""
+    ) or ""
+
+
+# ============================================================
+# ПРОДЛЕНИЕ ПОДПИСКИ
 # ============================================================
 
 def extend_subscription(
@@ -630,25 +861,39 @@ def extend_subscription(
     subscription="vip"
 ):
 
-    user = get_user(user_id)
+    user = get_user(
+        user_id
+    )
 
     if not user:
+
         return None
 
     now = now_moscow()
 
     current_until = parse_datetime(
-        user.get("subscription_until")
+        user.get(
+            "subscription_until"
+        )
     )
 
-    if current_until and current_until > now:
+    if (
+        current_until
+        and current_until > now
+    ):
+
         start = current_until
+
     else:
+
         start = now
 
-    from datetime import timedelta
-
-    new_until = start + timedelta(days=int(days))
+    new_until = (
+        start
+        + timedelta(
+            days=int(days)
+        )
+    )
 
     with connect() as db:
 
@@ -669,8 +914,14 @@ def extend_subscription(
 
         db.commit()
 
-    return get_user(user_id)
+    return get_user(
+        user_id
+    )
 
+
+# ============================================================
+# ПРОВЕРКА ИСТЁКШИХ ПОДПИСОК
+# ============================================================
 
 def expire_old_subscriptions():
 
@@ -682,20 +933,26 @@ def expire_old_subscriptions():
 
     for user in users:
 
-        subscription = user.get("subscription")
+        subscription = user.get(
+            "subscription"
+        )
 
         if subscription in (
-            "none",
+            None,
             "",
-            None
+            "none"
         ):
+
             continue
 
         until = parse_datetime(
-            user.get("subscription_until")
+            user.get(
+                "subscription_until"
+            )
         )
 
         if not until:
+
             continue
 
         if until <= now:
@@ -723,7 +980,7 @@ def expire_old_subscriptions():
 
 
 # ============================================================
-# DEVICE LIMIT
+# ЛИМИТ УСТРОЙСТВ
 # ============================================================
 
 def set_device_limit(
@@ -731,7 +988,10 @@ def set_device_limit(
     limit
 ):
 
-    limit = max(1, int(limit))
+    limit = max(
+        1,
+        int(limit)
+    )
 
     with connect() as db:
 
@@ -749,11 +1009,13 @@ def set_device_limit(
 
         db.commit()
 
-    return get_user(user_id)
+    return get_user(
+        user_id
+    )
 
 
 # ============================================================
-# BLOCK
+# БЛОКИРОВКА
 # ============================================================
 
 def block_user(
@@ -777,21 +1039,31 @@ def block_user(
 
         db.commit()
 
-    return get_user(user_id)
+    return get_user(
+        user_id
+    )
 
 
 # ============================================================
 # TRIAL
 # ============================================================
 
-def use_trial(user_id):
+def use_trial(
+    user_id
+):
 
-    user = get_user(user_id)
+    user = get_user(
+        user_id
+    )
 
     if not user:
+
         return False
 
-    if user.get("trial_used"):
+    if user.get(
+        "trial_used"
+    ):
+
         return False
 
     with connect() as db:
@@ -811,7 +1083,7 @@ def use_trial(user_id):
 
 
 # ============================================================
-# PAYMENTS
+# СОЗДАНИЕ ПЛАТЕЖА
 # ============================================================
 
 def create_payment(
@@ -830,18 +1102,20 @@ def create_payment(
                 tariff,
                 stars,
                 days,
+                telegram_charge_id,
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
                 tariff,
                 int(stars),
                 int(days),
+                "",
                 "pending",
-                now_moscow_iso(),
+                now_moscow_iso()
             )
         )
 
@@ -849,6 +1123,10 @@ def create_payment(
 
         return cursor.lastrowid
 
+
+# ============================================================
+# ЗАВЕРШЕНИЕ ПЛАТЕЖА
+# ============================================================
 
 def complete_payment(
     payment_id,
@@ -867,10 +1145,12 @@ def complete_payment(
         ).fetchone()
 
         if not payment:
+
             return None
 
-        # Защита от повторной оплаты
+        # Защита от повторной обработки
         if payment["status"] == "paid":
+
             return dict(payment)
 
         db.execute(
@@ -898,11 +1178,15 @@ def complete_payment(
             (payment_id,)
         ).fetchone()
 
-    return dict(payment) if payment else None
+    if not payment:
+
+        return None
+
+    return dict(payment)
 
 
 # ============================================================
-# PROMOCODES
+# ПРОМОКОД
 # ============================================================
 
 def create_promo(
@@ -911,7 +1195,20 @@ def create_promo(
     max_uses=1
 ):
 
-    code = str(code).strip().upper()
+    code = (
+        str(code)
+        .strip()
+        .upper()
+    )
+
+    if not code:
+
+        return False
+
+    max_uses = max(
+        1,
+        int(max_uses)
+    )
 
     with connect() as db:
 
@@ -925,6 +1222,7 @@ def create_promo(
         ).fetchone()
 
         if existing:
+
             return False
 
         db.execute(
@@ -942,8 +1240,8 @@ def create_promo(
                 code,
                 int(days),
                 0,
-                int(max_uses),
-                now_moscow_iso(),
+                max_uses,
+                now_moscow_iso()
             )
         )
 
@@ -957,7 +1255,15 @@ def use_promo(
     code
 ):
 
-    code = str(code).strip().upper()
+    code = (
+        str(code)
+        .strip()
+        .upper()
+    )
+
+    if not code:
+
+        return False
 
     with connect() as db:
 
@@ -971,12 +1277,16 @@ def use_promo(
         ).fetchone()
 
         if not promo:
+
             return False
 
-        if promo["uses"] >= promo["max_uses"]:
+        if (
+            promo["uses"]
+            >= promo["max_uses"]
+        ):
+
             return False
 
-        # Увеличиваем использование
         db.execute(
             """
             UPDATE promocodes
@@ -988,11 +1298,13 @@ def use_promo(
 
         db.commit()
 
-    return int(promo["days"])
+    return int(
+        promo["days"]
+    )
 
 
 # ============================================================
-# NODES
+# NODES / СЕРВЕРЫ
 # ============================================================
 
 def add_node(
@@ -1016,7 +1328,7 @@ def add_node(
                 name,
                 vless_link,
                 1,
-                now_moscow_iso(),
+                now_moscow_iso()
             )
         )
 
@@ -1025,7 +1337,9 @@ def add_node(
         return cursor.lastrowid
 
 
-def delete_node(node_id):
+def delete_node(
+    node_id
+):
 
     with connect() as db:
 
@@ -1038,6 +1352,8 @@ def delete_node(node_id):
         )
 
         db.commit()
+
+    return True
 
 
 def get_nodes(
@@ -1067,7 +1383,10 @@ def get_nodes(
                 """
             ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
 # ============================================================
@@ -1080,9 +1399,15 @@ def add_device(
     device_name=""
 ):
 
-    device_id = str(device_id)
+    device_id = str(
+        device_id
+    )
 
     with connect() as db:
+
+        # ----------------------------------------------------
+        # Проверяем существующее устройство
+        # ----------------------------------------------------
 
         existing = db.execute(
             """
@@ -1121,7 +1446,7 @@ def add_device(
             return True
 
         # ----------------------------------------------------
-        # Проверка лимита
+        # Получаем лимит
         # ----------------------------------------------------
 
         user = db.execute(
@@ -1134,9 +1459,17 @@ def add_device(
         ).fetchone()
 
         if not user:
+
             return False
 
-        limit = user["device_limit"] or 1
+        limit = (
+            user["device_limit"]
+            or 1
+        )
+
+        # ----------------------------------------------------
+        # Количество устройств
+        # ----------------------------------------------------
 
         count = db.execute(
             """
@@ -1148,6 +1481,7 @@ def add_device(
         ).fetchone()[0]
 
         if count >= limit:
+
             return False
 
         # ----------------------------------------------------
@@ -1168,7 +1502,7 @@ def add_device(
                 user_id,
                 device_id,
                 device_name or "",
-                now_moscow_iso(),
+                now_moscow_iso()
             )
         )
 
@@ -1177,7 +1511,9 @@ def add_device(
     return True
 
 
-def get_devices(user_id):
+def get_devices(
+    user_id
+):
 
     with connect() as db:
 
@@ -1191,7 +1527,10 @@ def get_devices(user_id):
             (user_id,)
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
 def delete_device(
@@ -1226,12 +1565,20 @@ def get_stats():
 
     with connect() as db:
 
+        # ----------------------------------------------------
+        # Всего пользователей
+        # ----------------------------------------------------
+
         users = db.execute(
             """
             SELECT COUNT(*)
             FROM users
             """
         ).fetchone()[0]
+
+        # ----------------------------------------------------
+        # Активные
+        # ----------------------------------------------------
 
         active = db.execute(
             """
@@ -1243,6 +1590,10 @@ def get_stats():
             """
         ).fetchone()[0]
 
+        # ----------------------------------------------------
+        # Заблокированные
+        # ----------------------------------------------------
+
         blocked = db.execute(
             """
             SELECT COUNT(*)
@@ -1250,6 +1601,10 @@ def get_stats():
             WHERE blocked = 1
             """
         ).fetchone()[0]
+
+        # ----------------------------------------------------
+        # Оплаченные платежи
+        # ----------------------------------------------------
 
         payments = db.execute(
             """
@@ -1259,13 +1614,24 @@ def get_stats():
             """
         ).fetchone()[0]
 
+        # ----------------------------------------------------
+        # Всего Stars
+        # ----------------------------------------------------
+
         stars = db.execute(
             """
-            SELECT COALESCE(SUM(stars), 0)
+            SELECT COALESCE(
+                SUM(stars),
+                0
+            )
             FROM payments
             WHERE status = 'paid'
             """
         ).fetchone()[0]
+
+        # ----------------------------------------------------
+        # Устройства
+        # ----------------------------------------------------
 
         devices = db.execute(
             """
@@ -1274,10 +1640,33 @@ def get_stats():
             """
         ).fetchone()[0]
 
+        # ----------------------------------------------------
+        # Промокоды
+        # ----------------------------------------------------
+
         promocodes = db.execute(
             """
             SELECT COUNT(*)
             FROM promocodes
+            """
+        ).fetchone()[0]
+
+        # ----------------------------------------------------
+        # Серверы
+        # ----------------------------------------------------
+
+        nodes = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM nodes
+            """
+        ).fetchone()[0]
+
+        nodes_active = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM nodes
+            WHERE enabled = 1
             """
         ).fetchone()[0]
 
@@ -1289,11 +1678,13 @@ def get_stats():
         "stars": stars,
         "devices": devices,
         "promocodes": promocodes,
+        "nodes": nodes,
+        "nodes_active": nodes_active,
     }
 
 
 # ============================================================
-# ЗАПУСК ИНИЦИАЛИЗАЦИИ
+# ИНИЦИАЛИЗАЦИЯ
 # ============================================================
 
 init_db()
