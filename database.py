@@ -1,10 +1,16 @@
-# database.py
-
 import os
 import sqlite3
 import secrets
 
+from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+
+
+# ============================================================
+# ENV
+# ============================================================
+
+load_dotenv()
 
 
 # ============================================================
@@ -14,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 DB_PATH = os.getenv(
     "DB_PATH",
     "./data/users.db",
-)
+).strip()
 
 
 # ============================================================
@@ -24,23 +30,28 @@ DB_PATH = os.getenv(
 UTC = timezone.utc
 
 
-def now_utc() -> datetime:
+def now_utc():
     return datetime.now(UTC)
 
 
-def now_iso() -> str:
+def now_iso():
     return now_utc().isoformat()
 
 
 def parse_datetime(value):
+
     if not value:
         return None
 
     if isinstance(value, datetime):
         dt = value
+
     else:
+
         try:
-            dt = datetime.fromisoformat(str(value))
+            dt = datetime.fromisoformat(
+                str(value)
+            )
         except (TypeError, ValueError):
             return None
 
@@ -50,7 +61,8 @@ def parse_datetime(value):
     return dt.astimezone(UTC)
 
 
-def format_date(value) -> str:
+def format_date(value):
+
     dt = parse_datetime(value)
 
     if not dt:
@@ -60,37 +72,55 @@ def format_date(value) -> str:
 
 
 # ============================================================
-# СОЕДИНЕНИЕ
+# DATABASE CONNECTION
 # ============================================================
 
 def connect():
-    path = os.path.abspath(DB_PATH)
+
+    path = os.path.abspath(
+        os.getenv(
+            "DB_PATH",
+            DB_PATH,
+        )
+    )
 
     directory = os.path.dirname(path)
 
     if directory:
-        os.makedirs(directory, exist_ok=True)
+        os.makedirs(
+            directory,
+            exist_ok=True,
+        )
 
-    connection = sqlite3.connect(
+    db = sqlite3.connect(
         path,
         timeout=30,
         check_same_thread=False,
     )
 
-    connection.row_factory = sqlite3.Row
+    db.row_factory = sqlite3.Row
 
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA busy_timeout=30000")
-    connection.execute("PRAGMA foreign_keys=ON")
+    db.execute(
+        "PRAGMA journal_mode=WAL"
+    )
 
-    return connection
+    db.execute(
+        "PRAGMA busy_timeout=30000"
+    )
+
+    db.execute(
+        "PRAGMA foreign_keys=ON"
+    )
+
+    return db
 
 
 # ============================================================
-# ИНИЦИАЛИЗАЦИЯ
+# INIT
 # ============================================================
 
 def init_db():
+
     with connect() as db:
 
         db.execute(
@@ -101,7 +131,7 @@ def init_db():
                 username TEXT DEFAULT '',
                 first_name TEXT DEFAULT '',
 
-                token TEXT UNIQUE NOT NULL,
+                token TEXT UNIQUE,
 
                 subscription TEXT DEFAULT 'none',
 
@@ -167,7 +197,7 @@ def init_db():
         )
 
         # ----------------------------------------------------
-        # МИГРАЦИИ СТАРОЙ БАЗЫ
+        # МИГРАЦИИ USERS
         # ----------------------------------------------------
 
         columns = {
@@ -178,35 +208,54 @@ def init_db():
         }
 
         migrations = {
-            "token": "ALTER TABLE users ADD COLUMN token TEXT",
+
+            "token": (
+                "ALTER TABLE users "
+                "ADD COLUMN token TEXT"
+            ),
+
             "subscription_content": (
                 "ALTER TABLE users "
-                "ADD COLUMN subscription_content TEXT DEFAULT ''"
+                "ADD COLUMN "
+                "subscription_content "
+                "TEXT DEFAULT ''"
             ),
+
             "blocked": (
                 "ALTER TABLE users "
-                "ADD COLUMN blocked INTEGER DEFAULT 0"
+                "ADD COLUMN blocked "
+                "INTEGER DEFAULT 0"
             ),
+
             "notify": (
                 "ALTER TABLE users "
-                "ADD COLUMN notify INTEGER DEFAULT 1"
+                "ADD COLUMN notify "
+                "INTEGER DEFAULT 1"
             ),
+
             "accepted_terms": (
                 "ALTER TABLE users "
-                "ADD COLUMN accepted_terms INTEGER DEFAULT 0"
+                "ADD COLUMN accepted_terms "
+                "INTEGER DEFAULT 0"
             ),
         }
 
         for column, sql in migrations.items():
 
-            if column not in columns:
+            if column in columns:
+                continue
 
-                try:
-                    db.execute(sql)
-                except sqlite3.OperationalError:
-                    pass
+            try:
 
-        # Заполняем token существующим пользователям
+                db.execute(sql)
+
+            except sqlite3.OperationalError:
+                pass
+
+        # ----------------------------------------------------
+        # TOKEN
+        # ----------------------------------------------------
+
         rows = db.execute(
             """
             SELECT user_id
@@ -236,14 +285,15 @@ def init_db():
 
 
 # ============================================================
-# ПОЛЬЗОВАТЕЛИ
+# USERS
 # ============================================================
 
 def create_user(
-    user_id: int,
-    username: str = "",
-    first_name: str = "",
+    user_id,
+    username="",
+    first_name="",
 ):
+
     with connect() as db:
 
         existing = db.execute(
@@ -294,7 +344,18 @@ def create_user(
                 accepted_terms,
                 created_at
             )
-            VALUES (?, ?, ?, ?, 'none', '', '', '', 0, 0, 1, 0, ?)
+            VALUES (
+                ?, ?, ?, ?,
+                'none',
+                '',
+                '',
+                '',
+                0,
+                0,
+                1,
+                0,
+                ?
+            )
             """,
             (
                 user_id,
@@ -310,7 +371,8 @@ def create_user(
     return get_user(user_id)
 
 
-def get_user(user_id: int):
+def get_user(user_id):
+
     with connect() as db:
 
         row = db.execute(
@@ -325,7 +387,11 @@ def get_user(user_id: int):
     return dict(row) if row else None
 
 
-def get_user_by_token(token: str):
+def get_user_by_token(token):
+
+    if not token:
+        return None
+
     with connect() as db:
 
         row = db.execute(
@@ -341,6 +407,7 @@ def get_user_by_token(token: str):
 
 
 def get_all_users():
+
     with connect() as db:
 
         rows = db.execute(
@@ -351,23 +418,31 @@ def get_all_users():
             """
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
 # ============================================================
-# ПОДПИСКА
+# SUBSCRIPTION
 # ============================================================
 
-def build_subscription_link(token: str):
+def build_subscription_link(token):
+
     from config import PUBLIC_URL
 
-    return f"{PUBLIC_URL}/sub/{token}"
+    return (
+        f"{PUBLIC_URL.rstrip('/')}"
+        f"/sub/{token}"
+    )
 
 
 def save_subscription_link(
-    user_id: int,
-    link: str,
+    user_id,
+    link,
 ):
+
     with connect() as db:
 
         db.execute(
@@ -385,19 +460,27 @@ def save_subscription_link(
         db.commit()
 
 
-def get_subscription_link(user_id: int):
+def get_subscription_link(user_id):
+
     user = get_user(user_id)
 
     if not user:
         return ""
 
-    return user.get("subscription_link", "")
+    return (
+        user.get(
+            "subscription_link",
+            "",
+        )
+        or ""
+    )
 
 
 def save_subscription_content(
-    user_id: int,
-    content: str,
+    user_id,
+    content,
 ):
+
     with connect() as db:
 
         db.execute(
@@ -407,7 +490,7 @@ def save_subscription_content(
             WHERE user_id = ?
             """,
             (
-                content,
+                content or "",
                 user_id,
             ),
         )
@@ -415,31 +498,41 @@ def save_subscription_content(
         db.commit()
 
 
-def get_subscription_content(user_id: int):
+def get_subscription_content(user_id):
+
     user = get_user(user_id)
 
     if not user:
         return ""
 
-    return user.get("subscription_content", "")
+    return (
+        user.get(
+            "subscription_content",
+            "",
+        )
+        or ""
+    )
 
 
 # ============================================================
-# ПРОДЛЕНИЕ
+# EXTEND
 # ============================================================
 
 def extend_subscription(
-    user_id: int,
-    days: int,
-    tariff: str = "",
+    user_id,
+    days,
+    tariff="",
 ):
+
     user = get_user(user_id)
 
     if not user:
         return None
 
     current = parse_datetime(
-        user.get("subscription_until")
+        user.get(
+            "subscription_until"
+        )
     )
 
     now = now_utc()
@@ -447,7 +540,10 @@ def extend_subscription(
     if current is None or current < now:
         current = now
 
-    new_until = current + timedelta(days=days)
+    new_until = (
+        current
+        + timedelta(days=int(days))
+    )
 
     with connect() as db:
 
@@ -459,8 +555,12 @@ def extend_subscription(
             WHERE user_id = ?
             """,
             (
-                tariff or user.get("subscription") or "active",
+                tariff
+                or user.get("subscription")
+                or "active",
+
                 new_until.isoformat(),
+
                 user_id,
             ),
         )
@@ -470,7 +570,8 @@ def extend_subscription(
     return get_user(user_id)
 
 
-def revoke_subscription(user_id: int):
+def revoke_subscription(user_id):
+
     with connect() as db:
 
         db.execute(
@@ -489,6 +590,7 @@ def revoke_subscription(user_id: int):
 
 
 def expire_old_subscriptions():
+
     now = now_utc()
 
     with connect() as db:
@@ -500,22 +602,28 @@ def expire_old_subscriptions():
             WHERE subscription_until != ''
               AND subscription_until IS NOT NULL
               AND subscription_until < ?
-              AND subscription NOT IN ('none', 'expired')
+              AND subscription NOT IN (
+                  'none',
+                  'expired'
+              )
             """,
-            (now.isoformat(),),
+            (
+                now.isoformat(),
+            ),
         )
 
         db.commit()
 
 
 # ============================================================
-# ПРОБНЫЙ ПЕРИОД
+# TRIAL
 # ============================================================
 
 def use_trial(
-    user_id: int,
-    days: int,
+    user_id,
+    days,
 ):
+
     user = get_user(user_id)
 
     if not user:
@@ -524,9 +632,10 @@ def use_trial(
     if user.get("trial_used"):
         return False
 
-    now = now_utc()
-
-    until = now + timedelta(days=days)
+    until = (
+        now_utc()
+        + timedelta(days=int(days))
+    )
 
     with connect() as db:
 
@@ -550,13 +659,14 @@ def use_trial(
 
 
 # ============================================================
-# БЛОКИРОВКА
+# BLOCK
 # ============================================================
 
 def set_blocked(
-    user_id: int,
-    blocked: bool,
+    user_id,
+    blocked,
 ):
+
     with connect() as db:
 
         db.execute(
@@ -576,25 +686,29 @@ def set_blocked(
     return get_user(user_id)
 
 
-def is_blocked(user_id: int):
+def is_blocked(user_id):
+
     user = get_user(user_id)
 
     if not user:
         return False
 
-    return bool(user.get("blocked"))
+    return bool(
+        user.get("blocked")
+    )
 
 
 # ============================================================
-# ПЛАТЕЖИ
+# PAYMENTS
 # ============================================================
 
 def create_payment(
-    user_id: int,
-    tariff: str,
-    days: int,
-    stars: int,
+    user_id,
+    tariff,
+    days,
+    stars,
 ):
+
     with connect() as db:
 
         cursor = db.execute(
@@ -607,7 +721,11 @@ def create_payment(
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, 'pending', ?)
+            VALUES (
+                ?, ?, ?, ?,
+                'pending',
+                ?
+            )
             """,
             (
                 user_id,
@@ -623,7 +741,8 @@ def create_payment(
         return cursor.lastrowid
 
 
-def get_payment(payment_id: int):
+def get_payment(payment_id):
+
     with connect() as db:
 
         row = db.execute(
@@ -639,9 +758,10 @@ def get_payment(payment_id: int):
 
 
 def complete_payment(
-    payment_id: int,
-    charge_id: str = "",
+    payment_id,
+    charge_id="",
 ):
+
     with connect() as db:
 
         db.execute(
@@ -665,15 +785,20 @@ def complete_payment(
 
 
 # ============================================================
-# ПРОМОКОДЫ
+# PROMOCODES
 # ============================================================
 
 def create_promo(
-    code: str,
-    days: int,
-    uses_left: int = 0,
+    code,
+    days,
+    uses_left=0,
 ):
-    code = code.strip().upper()
+
+    code = (
+        str(code)
+        .strip()
+        .upper()
+    )
 
     with connect() as db:
 
@@ -689,8 +814,8 @@ def create_promo(
             """,
             (
                 code,
-                days,
-                uses_left,
+                int(days),
+                int(uses_left),
                 now_iso(),
             ),
         )
@@ -699,10 +824,15 @@ def create_promo(
 
 
 def use_promo(
-    user_id: int,
-    code: str,
+    user_id,
+    code,
 ):
-    code = code.strip().upper()
+
+    code = (
+        str(code)
+        .strip()
+        .upper()
+    )
 
     with connect() as db:
 
@@ -718,14 +848,17 @@ def use_promo(
         if not promo:
             return None
 
-        uses_left = promo["uses_left"]
+        uses_left = int(
+            promo["uses_left"]
+        )
 
         if uses_left > 0:
 
             db.execute(
                 """
                 UPDATE promocodes
-                SET uses_left = uses_left - 1
+                SET uses_left =
+                    uses_left - 1
                 WHERE code = ?
                 """,
                 (code,),
@@ -737,10 +870,11 @@ def use_promo(
 
 
 # ============================================================
-# СТАТИСТИКА
+# STATS
 # ============================================================
 
 def get_stats():
+
     with connect() as db:
 
         total = db.execute(
@@ -758,7 +892,9 @@ def get_stats():
               AND subscription_until > ?
               AND blocked = 0
             """,
-            (now_iso(),),
+            (
+                now_iso(),
+            ),
         ).fetchone()[0]
 
         blocked = db.execute(
@@ -787,7 +923,10 @@ def get_stats():
 
         stars = db.execute(
             """
-            SELECT COALESCE(SUM(stars), 0)
+            SELECT COALESCE(
+                SUM(stars),
+                0
+            )
             FROM payments
             WHERE status = 'completed'
             """
@@ -804,7 +943,7 @@ def get_stats():
 
 
 # ============================================================
-# ЗАПУСК
+# INIT
 # ============================================================
 
 init_db()
