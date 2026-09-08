@@ -12,11 +12,17 @@ load_dotenv()
 # CONFIG
 # ============================================================
 
-DB_PATH = os.getenv("DB_PATH", "./data/users.db")
+DB_PATH = os.getenv(
+    "DB_PATH",
+    "./data/users.db",
+)
 
 try:
     DEFAULT_DEVICE_LIMIT = int(
-        os.getenv("DEFAULT_DEVICE_LIMIT", "3")
+        os.getenv(
+            "DEFAULT_DEVICE_LIMIT",
+            "3",
+        )
     )
 except ValueError:
     DEFAULT_DEVICE_LIMIT = 3
@@ -59,7 +65,9 @@ def format_date(value):
     if not dt:
         return "—"
 
-    return dt.astimezone(UTC).strftime("%d.%m.%Y %H:%M")
+    return dt.astimezone(UTC).strftime(
+        "%d.%m.%Y %H:%M"
+    )
 
 
 # ============================================================
@@ -67,10 +75,15 @@ def format_date(value):
 # ============================================================
 
 def connect():
-    directory = os.path.dirname(os.path.abspath(DB_PATH))
+    directory = os.path.dirname(
+        os.path.abspath(DB_PATH)
+    )
 
     if directory:
-        os.makedirs(directory, exist_ok=True)
+        os.makedirs(
+            directory,
+            exist_ok=True,
+        )
 
     conn = sqlite3.connect(
         DB_PATH,
@@ -80,9 +93,17 @@ def connect():
 
     conn.row_factory = sqlite3.Row
 
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "PRAGMA journal_mode=WAL"
+    )
+
+    conn.execute(
+        "PRAGMA busy_timeout=30000"
+    )
+
+    conn.execute(
+        "PRAGMA foreign_keys=ON"
+    )
 
     return conn
 
@@ -104,12 +125,17 @@ def _add_column_if_missing(
     column,
     definition,
 ):
-    columns = _columns(conn, table)
+    columns = _columns(
+        conn,
+        table,
+    )
 
     if column not in columns:
         conn.execute(
-            f"ALTER TABLE {table} "
-            f"ADD COLUMN {column} {definition}"
+            f"""
+            ALTER TABLE {table}
+            ADD COLUMN {column} {definition}
+            """
         )
 
 
@@ -269,7 +295,11 @@ def init_db():
             token = secrets.token_urlsafe(32)
 
             while conn.execute(
-                "SELECT 1 FROM users WHERE token = ?",
+                """
+                SELECT 1
+                FROM users
+                WHERE token = ?
+                """,
                 (token,),
             ).fetchone():
 
@@ -340,6 +370,17 @@ def create_user(
         else:
 
             token = secrets.token_urlsafe(32)
+
+            while conn.execute(
+                """
+                SELECT 1
+                FROM users
+                WHERE token = ?
+                """,
+                (token,),
+            ).fetchone():
+
+                token = secrets.token_urlsafe(32)
 
             conn.execute("""
                 INSERT INTO users (
@@ -450,7 +491,7 @@ def get_all_users():
 def build_subscription_link(token):
 
     public_url = os.getenv(
-        "PUBLIC_URL",
+        "PUBLIC_SITE_URL",
         "",
     ).rstrip("/")
 
@@ -487,10 +528,13 @@ def get_subscription_link(user_id):
     if not user:
         return ""
 
-    return user.get(
-        "subscription_link",
-        "",
-    ) or ""
+    return (
+        user.get(
+            "subscription_link",
+            "",
+        )
+        or ""
+    )
 
 
 def save_subscription_content(
@@ -523,10 +567,13 @@ def get_subscription_content(user_id):
     if not user:
         return ""
 
-    return user.get(
-        "subscription_content",
-        "",
-    ) or ""
+    return (
+        user.get(
+            "subscription_content",
+            "",
+        )
+        or ""
+    )
 
 
 # ============================================================
@@ -618,27 +665,19 @@ def expire_old_subscriptions():
     try:
 
         rows = conn.execute("""
-            SELECT user_id
+            SELECT user_id,
+                   subscription_until
             FROM users
             WHERE subscription_until != ''
         """).fetchall()
 
         expired = 0
-
         now = now_utc()
 
         for row in rows:
 
-            user = conn.execute("""
-                SELECT subscription_until
-                FROM users
-                WHERE user_id = ?
-            """, (
-                row["user_id"],
-            )).fetchone()
-
             expire = parse_datetime(
-                user["subscription_until"]
+                row["subscription_until"]
             )
 
             if expire and expire <= now:
@@ -715,44 +754,43 @@ def use_trial(
 # BLOCK
 # ============================================================
 
-def block_user(user_id):
-
+def set_blocked(
+    user_id,
+    blocked,
+):
     conn = connect()
 
     try:
 
-        conn.execute("""
+        cursor = conn.execute("""
             UPDATE users
-            SET blocked = 1
+            SET blocked = ?
             WHERE user_id = ?
         """, (
+            1 if blocked else 0,
             int(user_id),
         ))
 
         conn.commit()
 
+        return cursor.rowcount > 0
+
     finally:
         conn.close()
+
+
+def block_user(user_id):
+    return set_blocked(
+        user_id,
+        True,
+    )
 
 
 def unblock_user(user_id):
-
-    conn = connect()
-
-    try:
-
-        conn.execute("""
-            UPDATE users
-            SET blocked = 0
-            WHERE user_id = ?
-        """, (
-            int(user_id),
-        ))
-
-        conn.commit()
-
-    finally:
-        conn.close()
+    return set_blocked(
+        user_id,
+        False,
+    )
 
 
 # ============================================================
@@ -836,11 +874,6 @@ def complete_payment(
 
     try:
 
-        # ВАЖНО:
-        # одновременно проверяем статус,
-        # чтобы повторный Telegram callback
-        # не начислил подписку второй раз.
-
         cursor = conn.execute("""
             UPDATE payments
             SET status = 'completed',
@@ -882,7 +915,9 @@ def create_promo(
     days,
     uses_left=0,
 ):
-    code = str(code).strip().upper()
+    code = str(
+        code
+    ).strip().upper()
 
     conn = connect()
 
@@ -913,7 +948,9 @@ def use_promo(
     user_id,
     code,
 ):
-    code = str(code).strip().upper()
+    code = str(
+        code
+    ).strip().upper()
 
     conn = connect()
 
@@ -951,7 +988,9 @@ def use_promo(
 
         conn.commit()
 
-        return int(row["days"] or 0)
+        return int(
+            row["days"] or 0
+        )
 
     finally:
         conn.close()
@@ -1005,23 +1044,33 @@ def update_node(
         values = []
 
         if name is not None:
-            fields.append("name = ?")
+            fields.append(
+                "name = ?"
+            )
             values.append(name)
 
         if vless_link is not None:
-            fields.append("vless_link = ?")
+            fields.append(
+                "vless_link = ?"
+            )
             values.append(vless_link)
 
         if active is not None:
-            fields.append("active = ?")
-            values.append(int(bool(active)))
+            fields.append(
+                "active = ?"
+            )
+            values.append(
+                int(bool(active))
+            )
 
         if not fields:
             return False
 
-        values.append(int(node_id))
+        values.append(
+            int(node_id)
+        )
 
-        conn.execute(
+        cursor = conn.execute(
             f"""
             UPDATE nodes
             SET {", ".join(fields)}
@@ -1032,7 +1081,7 @@ def update_node(
 
         conn.commit()
 
-        return True
+        return cursor.rowcount > 0
 
     finally:
         conn.close()
@@ -1044,7 +1093,7 @@ def delete_node(node_id):
 
     try:
 
-        conn.execute("""
+        cursor = conn.execute("""
             DELETE FROM nodes
             WHERE id = ?
         """, (
@@ -1053,11 +1102,15 @@ def delete_node(node_id):
 
         conn.commit()
 
+        return cursor.rowcount > 0
+
     finally:
         conn.close()
 
 
-def get_nodes(active_only=True):
+def get_nodes(
+    active_only=True,
+):
 
     conn = connect()
 
@@ -1123,7 +1176,9 @@ def add_device(
     device_name="",
 ):
     user_id = int(user_id)
-    device_id = str(device_id).strip()
+    device_id = str(
+        device_id
+    ).strip()
 
     if not device_id:
         return False
@@ -1188,6 +1243,8 @@ def add_device(
         if limit > 0 and count >= limit:
             return False
 
+        timestamp = now_iso()
+
         conn.execute("""
             INSERT INTO devices (
                 user_id,
@@ -1201,8 +1258,8 @@ def add_device(
             user_id,
             device_id,
             device_name or "",
-            now_iso(),
-            now_iso(),
+            timestamp,
+            timestamp,
         ))
 
         conn.commit()
@@ -1222,7 +1279,7 @@ def remove_device(
 
     try:
 
-        conn.execute("""
+        cursor = conn.execute("""
             DELETE FROM devices
             WHERE user_id = ?
               AND device_id = ?
@@ -1232,6 +1289,8 @@ def remove_device(
         ))
 
         conn.commit()
+
+        return cursor.rowcount > 0
 
     finally:
         conn.close()
@@ -1243,7 +1302,7 @@ def clear_devices(user_id):
 
     try:
 
-        conn.execute("""
+        cursor = conn.execute("""
             DELETE FROM devices
             WHERE user_id = ?
         """, (
@@ -1251,6 +1310,8 @@ def clear_devices(user_id):
         ))
 
         conn.commit()
+
+        return cursor.rowcount
 
     finally:
         conn.close()
@@ -1299,6 +1360,7 @@ def get_stats():
             SELECT COUNT(*)
             FROM users
             WHERE subscription_until != ''
+              AND subscription_until IS NOT NULL
         """).fetchone()[0]
 
         payments = conn.execute("""
@@ -1308,7 +1370,10 @@ def get_stats():
         """).fetchone()[0]
 
         revenue = conn.execute("""
-            SELECT COALESCE(SUM(stars), 0)
+            SELECT COALESCE(
+                SUM(stars),
+                0
+            )
             FROM payments
             WHERE status = 'completed'
         """).fetchone()[0]
