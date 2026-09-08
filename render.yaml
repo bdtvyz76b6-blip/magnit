@@ -1,0 +1,76 @@
+services:
+  - type: web
+    name: magnit-vpn
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: ADMIN_ID
+        sync: false
+
+      - key: ADMIN_IDS
+        sync: false
+
+      - key: SERVICE_NAME
+        value: МАГНИТ VPN
+
+      - key: PUBLIC_URL
+        sync: false
+
+      - key: TELEGRAM_USERNAME
+        sync: false
+
+      - key: GITHUB_TOKEN
+        sync: false
+
+      - key: GITHUB_OWNER
+        value: bdtvyz76b6-blip
+
+      - key: GITHUB_REPO
+        value: vpn-sub
+
+      - key: GITHUB_BRANCH
+        value: main
+
+      - key: SERVERS_FILE
+        value: servers.txt
+
+      - key: NO_SERVERS_FILE
+        value: no_servers.txt
+
+      - key: AUTO_SYNC_ENABLED
+        value: "1"
+
+      - key: AUTO_SYNC_INTERVAL
+        value: "600"
+
+      - key: PROFILE_TITLE
+        value: "𝗦𝗨𝗕 - 𝗠𝗔𝗚𝗡𝗜𝗧 𝗩𝗣𝗡 🧲"
+
+      - key: PROFILE_UPDATE_INTERVAL
+        value: "1"
+
+      - key: TRAFFIC_TOTAL
+        value: "0"
+
+      - key: TRAFFIC_UPLOAD
+        value: "0"
+
+      - key: TRAFFIC_DOWNLOAD
+        value: "0"
+
+      - key: HIDE_SETTINGS
+        value: "true"
+
+      - key: DB_PATH
+        value: "./data/users.db"
+
+      - key: TRIAL_DAYS
+        value: "3"
