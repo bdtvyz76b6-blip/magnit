@@ -1,36 +1,26 @@
-from datetime import datetime
+# server.py
 
-from fastapi import (
-    FastAPI,
-    HTTPException,
+import os
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
+
+from config import (
+    SERVICE_NAME,
+    PROFILE_TITLE,
+    PROFILE_UPDATE_INTERVAL,
 )
-
-from fastapi.responses import Response
 
 from database import (
     get_user_by_token,
-    get_nodes,
-    get_devices,
-    add_device,
     parse_datetime,
     now_utc,
 )
 
-import os
-
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-SERVICE_NAME = os.getenv(
-    "SERVICE_NAME",
-    "Магнит VPN",
-)
-
-API_SECRET = os.getenv(
-    "API_SECRET",
-    "",
+from subscription import (
+    ensure_subscription,
+    build_subscription_content,
 )
 
 
@@ -39,81 +29,98 @@ API_SECRET = os.getenv(
 # ============================================================
 
 app = FastAPI(
-    title="Магнит VPN API"
+    title=f"{SERVICE_NAME} API",
+    docs_url=None,
+    redoc_url=None,
 )
 
 
 # ============================================================
-# USER CHECK
+# HELPERS
 # ============================================================
 
-def check_user(token):
+def check_user(token: str):
 
-    user = get_user_by_token(
-        token
-    )
+    user = get_user_by_token(token)
 
     if not user:
-
         raise HTTPException(
             status_code=404,
             detail="Subscription not found",
         )
 
-
     if int(
-        user.get("blocked", 0)
-        or 0
+        user.get("blocked", 0) or 0
     ):
-
         raise HTTPException(
             status_code=403,
             detail="Subscription blocked",
         )
 
+    subscription_until = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        or ""
+    )
 
-    if not user.get(
-        "subscription_until"
-    ):
-
+    if not subscription_until:
         raise HTTPException(
             status_code=403,
             detail="Subscription inactive",
         )
 
-
     expire = parse_datetime(
-        user.get(
-            "subscription_until"
-        )
+        subscription_until
     )
 
-
     if not expire:
-
         raise HTTPException(
             status_code=500,
             detail="Invalid expiration date",
         )
 
-
     if expire <= now_utc():
-
         raise HTTPException(
             status_code=403,
             detail="Subscription expired",
         )
 
-
     return user
 
 
+def get_expire_timestamp(
+    user,
+) -> int:
+
+    value = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        or ""
+    )
+
+    expire = parse_datetime(
+        value
+    )
+
+    if not expire:
+        return 0
+
+    return int(
+        expire.timestamp()
+    )
+
+
 # ============================================================
-# SUBSCRIPTION
+# SUBSCRIPTION API
 # ============================================================
 
 @app.get(
-    "/sub/{token}"
+    "/sub/{token}",
+    response_class=PlainTextResponse,
 )
 async def subscription(
     token: str,
@@ -123,84 +130,71 @@ async def subscription(
         token
     )
 
-
-    nodes = get_nodes(
-        active_only=True
+    user_id = int(
+        user["user_id"]
     )
 
+    try:
 
-    links = []
-
-    for node in nodes:
-
-        link = (
-            node.get(
-                "vless_link",
-                "",
-            )
-            or ""
-        ).strip()
-
-        if not link:
-            continue
-
-        if not link.startswith(
-            "vless://"
-        ):
-            continue
-
-        links.append(
-            link
+        ensure_subscription(
+            user_id
         )
 
+    except Exception as exc:
 
-    content = "\n".join(
-        links
+        print(
+            f"[SERVER] "
+            f"ensure_subscription "
+            f"error for {user_id}: "
+            f"{exc}"
+        )
+
+    # Берём серверы непосредственно
+    # из servers.txt.
+    content = build_subscription_content(
+        user_id
     )
 
+    if not content:
+        raise HTTPException(
+            status_code=503,
+            detail="No servers available",
+        )
 
-    encoded = __import__(
-        "base64"
-    ).b64encode(
-        content.encode("utf-8")
-    ).decode("ascii")
-
-
-    expire = int(
-        parse_datetime(
-            user[
-                "subscription_until"
-            ]
-        ).timestamp()
+    expire = get_expire_timestamp(
+        user
     )
-
 
     headers = {
+        "Cache-Control": (
+            "no-store, "
+            "no-cache, "
+            "must-revalidate"
+        ),
+        "Pragma": "no-cache",
+        "Expires": "0",
 
-        "subscription-userinfo":
+        "profile-title": PROFILE_TITLE,
+
+        "profile-update-interval": str(
+            PROFILE_UPDATE_INTERVAL
+        ),
+
+        "subscription-userinfo": (
             "upload=0;"
             "download=0;"
-            f"total=0;"
-            f"expire={expire}",
+            "total=0;"
+            f"expire={expire}"
+        ),
 
-        "profile-title":
-            SERVICE_NAME,
-
-        "profile-update-interval":
-            "6",
-
-        "content-disposition":
-            'attachment; '
-            'filename="magnit.txt"',
+        "content-disposition": (
+            'inline; filename="magnit.txt"'
+        ),
     }
 
-
-    return Response(
-        content=encoded,
-        media_type=(
-            "text/plain; "
-            "charset=utf-8"
-        ),
+    return PlainTextResponse(
+        content=content,
+        media_type="text/plain",
         headers=headers,
     )
 
@@ -220,161 +214,127 @@ async def subscription_json(
         token
     )
 
-
-    nodes = get_nodes(
-        active_only=True
-    )
-
-
-    servers = []
-
-
-    for node in nodes:
-
-        url = (
-            node.get(
-                "vless_link",
-                "",
-            )
-            or ""
-        ).strip()
-
-
-        if not url:
-            continue
-
-
-        servers.append({
-            "name": node.get(
-                "name",
-                "",
-            ),
-            "url": url,
-        })
-
-
-    expire = int(
-        parse_datetime(
-            user[
-                "subscription_until"
-            ]
-        ).timestamp()
-    )
-
-
-    data = {
-
-        "name":
-            SERVICE_NAME,
-
-        "expire":
-            expire,
-
-        "user": {
-
-            "id":
-                user["user_id"],
-
-            "subscription":
-                user.get(
-                    "subscription",
-                    "none",
-                ),
-
-            "device_limit":
-                int(
-                    user.get(
-                        "device_limit",
-                        3,
-                    )
-                    or 3
-                ),
-        },
-
-        "servers":
-            servers,
-    }
-
-
-    return data
-
-
-# ============================================================
-# DEVICE REGISTER
-# ============================================================
-
-@app.post(
-    "/api/device/{token}"
-)
-async def register_device(
-    token: str,
-    device_id: str,
-    device_name: str = "",
-):
-
-    user = check_user(
-        token
-    )
-
-
-    success = add_device(
-        user["user_id"],
-        device_id,
-        device_name,
-    )
-
-
-    if not success:
-
-        return {
-            "success": False,
-            "error":
-                "device_limit",
-        }
-
-
-    return {
-        "success": True,
-    }
-
-
-# ============================================================
-# DEVICES
-# ============================================================
-
-@app.get(
-    "/api/devices/{token}"
-)
-async def devices(
-    token: str,
-):
-
-    user = check_user(
-        token
-    )
-
-
-    items = get_devices(
+    user_id = int(
         user["user_id"]
     )
 
+    content = build_subscription_content(
+        user_id
+    )
+
+    servers = []
+
+    for line in content.splitlines():
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if not line.startswith(
+            "vless://"
+        ):
+            continue
+
+        name = ""
+
+        if "#" in line:
+
+            name = line.split(
+                "#",
+                1,
+            )[1]
+
+        servers.append(
+            {
+                "name": name,
+                "url": line,
+            }
+        )
+
+    expire = get_expire_timestamp(
+        user
+    )
 
     return {
+        "service": SERVICE_NAME,
 
-        "success":
-            True,
-
-        "limit":
-            int(
-                user.get(
-                    "device_limit",
-                    3,
-                )
-                or 3
+        "profile": {
+            "title": PROFILE_TITLE,
+            "update_interval": (
+                PROFILE_UPDATE_INTERVAL
             ),
+        },
 
-        "devices":
-            items,
+        "user": {
+            "id": user_id,
+            "subscription": user.get(
+                "subscription",
+                "none",
+            ),
+            "subscription_until": user.get(
+                "subscription_until",
+                "",
+            ),
+            "expire": expire,
+        },
+
+        "servers": servers,
+    }
+
+
+# ============================================================
+# CHECK SUBSCRIPTION
+# ============================================================
+
+@app.get(
+    "/api/check/{token}"
+)
+async def check_subscription(
+    token: str,
+):
+
+    user = check_user(
+        token
+    )
+
+    expire = get_expire_timestamp(
+        user
+    )
+
+    return {
+        "success": True,
+
+        "user_id": int(
+            user["user_id"]
+        ),
+
+        "active": True,
+
+        "subscription": user.get(
+            "subscription",
+            "none",
+        ),
+
+        "subscription_until": user.get(
+            "subscription_until",
+            "",
+        ),
+
+        "expire": expire,
+    }
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+async def root():
+
+    return {
+        "service": SERVICE_NAME,
+        "status": "online",
     }
 
 
@@ -382,24 +342,12 @@ async def devices(
 # HEALTH
 # ============================================================
 
-@app.get("/")
-async def root():
-
-    return {
-        "service":
-            SERVICE_NAME,
-
-        "status":
-            "online",
-    }
-
-
 @app.get("/health")
 async def health():
 
     return {
-        "status":
-            "ok",
+        "status": "ok",
+        "service": SERVICE_NAME,
     }
 
 
@@ -411,14 +359,16 @@ if __name__ == "__main__":
 
     import uvicorn
 
+    port = int(
+        os.getenv(
+            "PORT",
+            "8080",
+        )
+    )
+
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
-        port=int(
-            os.getenv(
-                "PORT",
-                "8080",
-            )
-        ),
+        port=port,
         reload=False,
     )
