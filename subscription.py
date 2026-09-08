@@ -30,62 +30,39 @@ from database import (
 )
 
 
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
-
 GITHUB_API = "https://api.github.com"
 
-# ВАЖНО:
-# HTTP-заголовки должны содержать только ASCII.
-# Поэтому здесь НЕ используется название сервиса,
-# PROFILE_TITLE и любые кириллические символы.
-HTTP_USER_AGENT = "magnit-vpn/1.0"
+# Только ASCII!
+USER_AGENT = "magnit-vpn/1.0"
 
 
 # ============================================================
-# БЕЗОПАСНАЯ ОЧИСТКА HTTP ЗАГОЛОВКОВ
+# HTTP
 # ============================================================
 
-def ascii_header_value(value):
-    """
-    Приводит значение HTTP-заголовка к безопасному ASCII.
-
-    Это предотвращает:
-    UnicodeEncodeError:
-    'latin-1' codec can't encode characters
-    """
-
+def safe_ascii(value):
     if value is None:
         return ""
 
-    value = str(value).strip()
+    return (
+        str(value)
+        .strip()
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
 
-    # Удаляем всё, что не является ASCII.
-    value = value.encode("ascii", "ignore").decode("ascii")
-
-    return value
-
-
-# ============================================================
-# GITHUB HEADERS
-# ============================================================
 
 def github_headers():
-    """
-    Заголовки GitHub API.
-
-    КРИТИЧНО:
-    Никакой кириллицы и эмодзи здесь быть не должно.
-    """
-
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": HTTP_USER_AGENT,
+        "User-Agent": USER_AGENT,
     }
 
-    token = ascii_header_value(GITHUB_TOKEN)
+    token = safe_ascii(GITHUB_TOKEN)
+
+    # Убираем возможные кавычки из переменной Render
+    token = token.strip("\"' ")
 
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -93,31 +70,21 @@ def github_headers():
     return headers
 
 
-# ============================================================
-# GITHUB URL
-# ============================================================
-
 def github_file_url(filename):
     filename = str(filename).strip().lstrip("/")
 
     return (
         f"{GITHUB_API}/repos/"
-        f"{GITHUB_OWNER}/{GITHUB_REPO}/contents/{filename}"
-        f"?ref={GITHUB_BRANCH}"
+        f"{GITHUB_OWNER}/{GITHUB_REPO}/contents/"
+        f"{filename}?ref={GITHUB_BRANCH}"
     )
 
 
 # ============================================================
-# LOAD GITHUB FILE
+# GITHUB FILE
 # ============================================================
 
 def load_github_file(filename):
-    """
-    Загружает файл из GitHub.
-
-    Возвращает обычный UTF-8 текст.
-    """
-
     url = github_file_url(filename)
 
     try:
@@ -126,40 +93,42 @@ def load_github_file(filename):
             headers=github_headers(),
             timeout=20,
         )
-
     except requests.RequestException as e:
         print(f"[GITHUB] request error: {e}")
         return ""
 
     if response.status_code == 404:
-        print(f"[GITHUB] file not found: {filename}")
+        print(f"[GITHUB] {filename}: 404")
         return ""
 
     if response.status_code != 200:
         print(
-            f"[GITHUB] HTTP {response.status_code} "
-            f"for {filename}: {response.text[:500]}"
+            f"[GITHUB] {filename}: "
+            f"HTTP {response.status_code} "
+            f"{response.text[:300]}"
         )
         return ""
 
     try:
         data = response.json()
     except Exception as e:
-        print(f"[GITHUB] invalid JSON for {filename}: {e}")
+        print(f"[GITHUB] JSON error: {e}")
         return ""
 
-    encoded = data.get("content", "")
+    content = data.get("content", "")
 
-    if not encoded:
+    if not content:
         return ""
-
-    encoded = encoded.replace("\n", "").replace("\r", "").strip()
 
     try:
-        decoded = base64.b64decode(encoded)
+        content = content.replace("\n", "").replace("\r", "")
+
+        decoded = base64.b64decode(content)
+
         return decoded.decode("utf-8")
+
     except Exception as e:
-        print(f"[GITHUB] decode error for {filename}: {e}")
+        print(f"[GITHUB] decode error: {e}")
         return ""
 
 
@@ -168,18 +137,15 @@ def load_github_file(filename):
 # ============================================================
 
 def clean_servers(content):
-    """
-    Оставляет только VLESS-ссылки.
-    """
-
     if not content:
         return []
 
     result = []
+    seen = set()
 
-    for raw_line in content.splitlines():
+    for raw in content.splitlines():
 
-        line = raw_line.strip()
+        line = raw.strip()
 
         if not line:
             continue
@@ -187,24 +153,31 @@ def clean_servers(content):
         if not line.startswith("vless://"):
             continue
 
+        # Убираем случайные пробелы
+        line = line.strip()
+
+        # Не добавляем дубли
+        if line in seen:
+            continue
+
+        seen.add(line)
         result.append(line)
 
     return result
 
 
 def load_servers():
-    """
-    Сначала загружает servers.txt.
-
-    Если файл пустой или недоступен,
-    пробует no_servers.txt.
-    """
-
     content = load_github_file(SERVERS_FILE)
+
     servers = clean_servers(content)
 
     if servers:
         return servers
+
+    print(
+        f"[SUBSCRIPTION] {SERVERS_FILE} empty, "
+        f"trying {NO_SERVERS_FILE}"
+    )
 
     fallback = load_github_file(NO_SERVERS_FILE)
 
@@ -212,17 +185,10 @@ def load_servers():
 
 
 # ============================================================
-# HAPP HEADERS
+# HAPP PROFILE
 # ============================================================
 
 def build_happ_headers(user=None):
-    """
-    Заголовки профиля Happ.
-
-    Это НЕ HTTP-заголовки.
-    Они находятся внутри содержимого подписки,
-    поэтому здесь разрешены Unicode, кириллица и эмодзи.
-    """
 
     headers = []
 
@@ -234,12 +200,12 @@ def build_happ_headers(user=None):
         )
 
     try:
-        update_interval = int(PROFILE_UPDATE_INTERVAL)
+        interval = int(PROFILE_UPDATE_INTERVAL)
     except (TypeError, ValueError):
-        update_interval = 1
+        interval = 1
 
     headers.append(
-        f"#profile-update-interval: {update_interval}"
+        f"#profile-update-interval: {interval}"
     )
 
     try:
@@ -265,67 +231,68 @@ def build_happ_headers(user=None):
     )
 
     if HIDE_SETTINGS:
-        headers.append("#profile-web-page-url:")
-        headers.append("#profile-profile-web-page-url:")
+        headers.append(
+            "#profile-web-page-url:"
+        )
+
+        headers.append(
+            "#profile-profile-web-page-url:"
+        )
 
     return headers
 
 
 # ============================================================
-# BUILD SUBSCRIPTION
+# SUBSCRIPTION CONTENT
 # ============================================================
 
 def build_subscription_content(user=None):
-    """
-    Создаёт обычную текстовую подписку для Happ.
-
-    Формат:
-
-    #profile-title: ...
-    #profile-update-interval: ...
-    #subscription-userinfo: ...
-
-    vless://...
-    vless://...
-    """
 
     servers = load_servers()
 
-    headers = build_happ_headers(user)
-
     lines = []
 
-    for header in headers:
-        lines.append(header)
+    # Happ metadata
+    lines.extend(
+        build_happ_headers(user)
+    )
 
+    # VLESS
     if servers:
+
         lines.append("")
 
-        for server in servers:
-            lines.append(server)
+        lines.extend(servers)
 
-    return "\n".join(lines).strip() + "\n"
+    content = "\n".join(lines).strip()
+
+    if not content:
+        return ""
+
+    return content + "\n"
 
 
 # ============================================================
-# USER SYNC
+# USER SUBSCRIPTION
 # ============================================================
 
 def sync_user(user_id):
-    """
-    Полностью пересоздаёт подписку пользователя.
-    """
 
     user = get_user(user_id)
 
     if not user:
-        print(f"[SUBSCRIPTION] user not found: {user_id}")
+        print(
+            f"[SUBSCRIPTION] user {user_id} not found"
+        )
         return None
 
     token = user.get("token")
 
     if not token:
-        print(f"[SUBSCRIPTION] token missing: {user_id}")
+        print(
+            f"[SUBSCRIPTION] user {user_id}: "
+            f"token missing"
+        )
         return None
 
     try:
@@ -339,7 +306,7 @@ def sync_user(user_id):
 
     if not content.strip():
         print(
-            f"[SUBSCRIPTION] empty content "
+            f"[SUBSCRIPTION] empty subscription "
             f"user={user_id}"
         )
         return None
@@ -359,7 +326,7 @@ def sync_user(user_id):
 
     except Exception as e:
         print(
-            f"[SUBSCRIPTION] database save error "
+            f"[SUBSCRIPTION] database error "
             f"user={user_id}: {e}"
         )
         return None
@@ -373,15 +340,10 @@ def sync_user(user_id):
 
 
 # ============================================================
-# ENSURE SUBSCRIPTION
+# ENSURE
 # ============================================================
 
 def ensure_subscription(user_id):
-    """
-    Гарантирует наличие ссылки и содержимого подписки.
-
-    Используется web.py.
-    """
 
     user = get_user(user_id)
 
@@ -403,7 +365,7 @@ def ensure_subscription(user_id):
         or ""
     )
 
-    # Если подписка уже есть — просто сохраняем ссылку.
+    # Уже существует
     if content.strip():
 
         try:
@@ -419,9 +381,10 @@ def ensure_subscription(user_id):
 
         return link
 
-    # Если содержимого нет — создаём.
+    # Создаём новую
     try:
         content = build_subscription_content(user)
+
     except Exception as e:
         print(
             f"[SUBSCRIPTION] ensure build error "
@@ -433,31 +396,35 @@ def ensure_subscription(user_id):
         return ""
 
     try:
-        save_subscription_link(
-            user_id,
-            link,
-        )
 
         save_subscription_content(
             user_id,
             content,
         )
 
+        save_subscription_link(
+            user_id,
+            link,
+        )
+
     except Exception as e:
+
         print(
             f"[SUBSCRIPTION] ensure save error "
             f"user={user_id}: {e}"
         )
+
         return ""
 
     return link
 
 
 # ============================================================
-# SYNC ALL USERS
+# SYNC ALL
 # ============================================================
 
 def sync_all_users():
+
     users = get_all_users()
 
     success = 0
@@ -465,35 +432,30 @@ def sync_all_users():
     for user in users:
 
         try:
-            user_id = int(user["user_id"])
 
-            result = sync_user(user_id)
+            user_id = int(
+                user["user_id"]
+            )
 
-            if result:
+            if sync_user(user_id):
                 success += 1
 
         except Exception as e:
 
             print(
-                f"[SUBSCRIPTION] sync error "
+                "[SUBSCRIPTION] sync error "
                 f"user={user.get('user_id')}: {e}"
             )
 
     print(
-        f"[SUBSCRIPTION] sync complete: "
-        f"{success}/{len(users)}"
+        f"[SUBSCRIPTION] "
+        f"sync complete: {success}/{len(users)}"
     )
 
     return success
 
 
 def sync_all_active_users():
-    """
-    Совместимость со старым кодом.
-
-    Сейчас синхронизируются все пользователи.
-    """
-
     return sync_all_users()
 
 
@@ -502,7 +464,7 @@ def force_sync():
 
 
 # ============================================================
-# GITHUB CONNECTION CHECK
+# GITHUB CHECK
 # ============================================================
 
 def check_github_connection():
@@ -524,7 +486,8 @@ def check_github_connection():
             return True
 
         print(
-            f"[GITHUB] HTTP {response.status_code}: "
+            f"[GITHUB] HTTP "
+            f"{response.status_code}: "
             f"{response.text[:500]}"
         )
 
@@ -540,7 +503,7 @@ def check_github_connection():
 
 
 # ============================================================
-# SERVERS INFO
+# SERVER INFO
 # ============================================================
 
 def get_servers_info():
@@ -563,14 +526,13 @@ _sync_thread = None
 def _auto_sync_worker():
 
     print(
-        "[SUBSCRIPTION] auto sync started, "
+        "[SUBSCRIPTION] auto sync started "
         f"interval={AUTO_SYNC_INTERVAL}s"
     )
 
     while True:
 
         try:
-
             sync_all_users()
 
         except Exception as e:
@@ -581,13 +543,10 @@ def _auto_sync_worker():
             )
 
         try:
-
             interval = int(
                 AUTO_SYNC_INTERVAL
             )
-
         except (TypeError, ValueError):
-
             interval = 600
 
         time.sleep(
@@ -612,7 +571,6 @@ def start_auto_sync():
         _sync_thread
         and _sync_thread.is_alive()
     ):
-
         return
 
     _sync_thread = threading.Thread(
