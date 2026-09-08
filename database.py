@@ -1,47 +1,44 @@
+import os
 import sqlite3
 import secrets
-import string
-import uuid
+import uuid as uuid_lib
 
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from config import DATABASE_PATH
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 # ============================================================
-# TIMEZONE
+# НАСТРОЙКИ
 # ============================================================
+
+DB_PATH = os.getenv("DB_PATH", "/data/users.db")
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
+# ============================================================
+# ВРЕМЯ
+# ============================================================
+
 def now_moscow():
-    """
-    Текущее время по Москве.
-    Возвращает timezone-aware datetime.
-    """
+    """Текущее время по Москве."""
     return datetime.now(MOSCOW_TZ)
 
 
 def now_moscow_iso():
-    """
-    Текущее московское время в ISO формате.
-    """
+    """Текущее московское время в ISO формате."""
     return now_moscow().isoformat()
 
 
 def parse_datetime(value):
     """
-    Безопасно преобразует дату из БД в datetime.
-
-    Поддерживает:
-    - старые даты без timezone;
-    - новые даты с timezone;
-    - datetime;
-    - пустые значения.
+    Преобразует строку/дату в timezone-aware datetime.
+    Старые даты без timezone считаются московскими.
     """
-
     if not value:
         return None
 
@@ -50,613 +47,577 @@ def parse_datetime(value):
     else:
         try:
             dt = datetime.fromisoformat(str(value))
-        except Exception:
+        except (ValueError, TypeError):
             return None
 
-    # Старые даты из БД могли быть без timezone.
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=MOSCOW_TZ)
 
-    return dt.astimezone(MOSCOW_TZ)
+    return dt
 
 
 # ============================================================
-# CONNECTION
+# ПОДКЛЮЧЕНИЕ К БД
 # ============================================================
 
 def connect():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
     db = sqlite3.connect(
-        DATABASE_PATH,
-        check_same_thread=False,
+        DB_PATH,
         timeout=30,
+        check_same_thread=False,
     )
 
     db.row_factory = sqlite3.Row
 
-    # SQLite будет ждать освобождения БД.
-    db.execute("PRAGMA busy_timeout = 30000")
+    try:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
 
     return db
 
 
 # ============================================================
-# INIT / MIGRATION
+# ГЕНЕРАЦИЯ
 # ============================================================
 
-def column_exists(db, table, column):
-    cur = db.cursor()
-
-    cur.execute(
-        f"PRAGMA table_info({table})"
-    )
-
-    columns = [
-        row["name"]
-        for row in cur.fetchall()
-    ]
-
-    return column in columns
-
-
-def add_column_if_missing(
-    db,
-    table,
-    column,
-    definition,
-):
-    if not column_exists(
-        db,
-        table,
-        column,
-    ):
-        db.execute(
-            f"ALTER TABLE {table} "
-            f"ADD COLUMN {column} {definition}"
-        )
-
-
-def init_db():
-
-    db = connect()
-    cur = db.cursor()
-
-    # --------------------------------------------------------
-    # USERS
-    # --------------------------------------------------------
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT DEFAULT '',
-            first_name TEXT DEFAULT '',
-
-            token TEXT UNIQUE,
-            uuid TEXT UNIQUE,
-
-            subscription TEXT DEFAULT 'none',
-            subscription_until TEXT DEFAULT '',
-
-            subscription_link TEXT DEFAULT '',
-
-            device_limit INTEGER DEFAULT 2,
-
-            trial_used INTEGER DEFAULT 0,
-            blocked INTEGER DEFAULT 0,
-
-            notify INTEGER DEFAULT 1,
-
-            created_at TEXT DEFAULT ''
-        )
-    """)
-
-    # --------------------------------------------------------
-    # PAYMENTS
-    # --------------------------------------------------------
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            tariff TEXT,
-            stars INTEGER,
-            days INTEGER,
-            telegram_charge_id TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending',
-            created_at TEXT DEFAULT ''
-        )
-    """)
-
-    # --------------------------------------------------------
-    # PROMOCODES
-    # --------------------------------------------------------
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS promocodes (
-            code TEXT PRIMARY KEY,
-            days INTEGER DEFAULT 0,
-            uses INTEGER DEFAULT 0,
-            max_uses INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT ''
-        )
-    """)
-
-    # --------------------------------------------------------
-    # NODES
-    # --------------------------------------------------------
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS nodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            vless_link TEXT NOT NULL,
-            enabled INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT ''
-        )
-    """)
-
-    # --------------------------------------------------------
-    # DEVICES
-    # --------------------------------------------------------
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS devices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            device_id TEXT,
-            device_name TEXT DEFAULT '',
-            last_seen TEXT DEFAULT '',
-
-            UNIQUE(user_id, device_id)
-        )
-    """)
-
-    # ========================================================
-    # МИГРАЦИЯ СТАРОЙ БД
-    # ========================================================
-
-    # USERS
-    add_column_if_missing(
-        db,
-        "users",
-        "subscription_link",
-        "TEXT DEFAULT ''",
-    )
-
-    add_column_if_missing(
-        db,
-        "users",
-        "device_limit",
-        "INTEGER DEFAULT 2",
-    )
-
-    add_column_if_missing(
-        db,
-        "users",
-        "blocked",
-        "INTEGER DEFAULT 0",
-    )
-
-    add_column_if_missing(
-        db,
-        "users",
-        "notify",
-        "INTEGER DEFAULT 1",
-    )
-
-    add_column_if_missing(
-        db,
-        "users",
-        "token",
-        "TEXT",
-    )
-
-    add_column_if_missing(
-        db,
-        "users",
-        "uuid",
-        "TEXT",
-    )
-
-    # PAYMENTS
-    add_column_if_missing(
-        db,
-        "payments",
-        "tariff",
-        "TEXT",
-    )
-
-    add_column_if_missing(
-        db,
-        "payments",
-        "stars",
-        "INTEGER DEFAULT 0",
-    )
-
-    add_column_if_missing(
-        db,
-        "payments",
-        "days",
-        "INTEGER DEFAULT 0",
-    )
-
-    add_column_if_missing(
-        db,
-        "payments",
-        "telegram_charge_id",
-        "TEXT DEFAULT ''",
-    )
-
-    add_column_if_missing(
-        db,
-        "payments",
-        "status",
-        "TEXT DEFAULT 'pending'",
-    )
-
-    # ========================================================
-    # ЗАПОЛНЯЕМ ДАТЫ ДЛЯ СТАРЫХ ЗАПИСЕЙ
-    # ========================================================
-
-    cur.execute("""
-        UPDATE users
-        SET created_at=?
-        WHERE created_at IS NULL
-           OR created_at=''
-    """, (
-        now_moscow_iso(),
-    ))
-
-    cur.execute("""
-        UPDATE payments
-        SET created_at=?
-        WHERE created_at IS NULL
-           OR created_at=''
-    """, (
-        now_moscow_iso(),
-    ))
-
-    cur.execute("""
-        UPDATE promocodes
-        SET created_at=?
-        WHERE created_at IS NULL
-           OR created_at=''
-    """, (
-        now_moscow_iso(),
-    ))
-
-    cur.execute("""
-        UPDATE nodes
-        SET created_at=?
-        WHERE created_at IS NULL
-           OR created_at=''
-    """, (
-        now_moscow_iso(),
-    ))
-
-    cur.execute("""
-        UPDATE devices
-        SET last_seen=?
-        WHERE last_seen IS NULL
-           OR last_seen=''
-    """, (
-        now_moscow_iso(),
-    ))
-
-    # ========================================================
-    # ГЕНЕРИРУЕМ TOKEN / UUID СТАРЫМ ПОЛЬЗОВАТЕЛЯМ
-    # ========================================================
-
-    cur.execute("""
-        SELECT user_id
-        FROM users
-        WHERE token IS NULL
-           OR token=''
-    """)
-
-    users_without_token = cur.fetchall()
-
-    for row in users_without_token:
-
-        token = generate_token()
-
-        # Защита от редкого совпадения.
-        while True:
-
-            cur.execute(
-                "SELECT 1 FROM users WHERE token=?",
-                (token,)
-            )
-
-            if not cur.fetchone():
-                break
-
-            token = generate_token()
-
-        cur.execute("""
-            UPDATE users
-            SET token=?
-            WHERE user_id=?
-        """, (
-            token,
-            row["user_id"],
-        ))
-
-    cur.execute("""
-        SELECT user_id
-        FROM users
-        WHERE uuid IS NULL
-           OR uuid=''
-    """)
-
-    users_without_uuid = cur.fetchall()
-
-    for row in users_without_uuid:
-
-        user_uuid = generate_uuid()
-
-        cur.execute("""
-            UPDATE users
-            SET uuid=?
-            WHERE user_id=?
-        """, (
-            user_uuid,
-            row["user_id"],
-        ))
-
-    # ========================================================
-    # СОЗДАЁМ ССЫЛКИ СУЩЕСТВУЮЩИМ ПОЛЬЗОВАТЕЛЯМ
-    # ========================================================
-
-    try:
-        from config import PUBLIC_URL
-
-        public_url = str(
-            PUBLIC_URL
-        ).rstrip("/")
-
-        cur.execute("""
-            SELECT user_id, token
-            FROM users
-            WHERE subscription_link IS NULL
-               OR subscription_link=''
-        """)
-
-        users_without_link = cur.fetchall()
-
-        for row in users_without_link:
-
-            if row["token"]:
-
-                link = (
-                    f"{public_url}/sub/"
-                    f"{row['token']}"
-                )
-
-                cur.execute("""
-                    UPDATE users
-                    SET subscription_link=?
-                    WHERE user_id=?
-                """, (
-                    link,
-                    row["user_id"],
-                ))
-
-    except Exception as e:
-
-        print(
-            "Subscription link migration error:",
-            e,
-        )
-
-    db.commit()
-    db.close()
-
-
-# ============================================================
-# USER
-# ============================================================
-
-def generate_token(length=40):
-
-    chars = (
-        string.ascii_letters
-        + string.digits
-    )
-
-    return "".join(
-        secrets.choice(chars)
-        for _ in range(length)
-    )
+def generate_token(length=32):
+    return secrets.token_urlsafe(length)
 
 
 def generate_uuid():
+    return str(uuid_lib.uuid4())
 
-    return str(
-        uuid.uuid4()
-    )
 
+# ============================================================
+# PUBLIC URL
+# ============================================================
+
+def get_public_url():
+    try:
+        from config import PUBLIC_URL
+
+        if PUBLIC_URL:
+            return PUBLIC_URL.rstrip("/")
+    except Exception:
+        pass
+
+    return os.getenv(
+        "PUBLIC_URL",
+        "https://orelvpnrailoh-1.onrender.com"
+    ).rstrip("/")
+
+
+def build_subscription_link(token):
+    """
+    Основная ссылка пользователя.
+    """
+
+    public_url = get_public_url()
+
+    return f"{public_url}/sub/{token}"
+
+
+# ============================================================
+# ИНИЦИАЛИЗАЦИЯ БД
+# ============================================================
+
+def init_db():
+
+    with connect() as db:
+
+        # ----------------------------------------------------
+        # USERS
+        # ----------------------------------------------------
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+
+                token TEXT DEFAULT '',
+                uuid TEXT DEFAULT '',
+
+                subscription TEXT DEFAULT 'none',
+                subscription_until TEXT DEFAULT '',
+
+                subscription_link TEXT DEFAULT '',
+
+                device_limit INTEGER DEFAULT 1,
+
+                trial_used INTEGER DEFAULT 0,
+
+                blocked INTEGER DEFAULT 0,
+
+                notify INTEGER DEFAULT 1,
+
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # PAYMENTS
+        # ----------------------------------------------------
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                user_id INTEGER,
+
+                tariff TEXT DEFAULT '',
+                stars INTEGER DEFAULT 0,
+                days INTEGER DEFAULT 0,
+
+                telegram_charge_id TEXT DEFAULT '',
+
+                status TEXT DEFAULT 'pending',
+
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # PROMOCODES
+        # ----------------------------------------------------
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promocodes (
+                code TEXT PRIMARY KEY,
+
+                days INTEGER DEFAULT 0,
+
+                uses INTEGER DEFAULT 0,
+
+                max_uses INTEGER DEFAULT 1,
+
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # NODES
+        # ----------------------------------------------------
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                name TEXT NOT NULL,
+
+                vless_link TEXT NOT NULL,
+
+                enabled INTEGER DEFAULT 1,
+
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # DEVICES
+        # ----------------------------------------------------
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                user_id INTEGER NOT NULL,
+
+                device_id TEXT NOT NULL,
+
+                device_name TEXT DEFAULT '',
+
+                last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+
+                UNIQUE(user_id, device_id)
+            )
+            """
+        )
+
+        db.commit()
+
+        # ====================================================
+        # МИГРАЦИЯ СТАРОЙ БД
+        # ====================================================
+
+        columns = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(users)"
+            ).fetchall()
+        }
+
+        migrations = {
+            "token": "ALTER TABLE users ADD COLUMN token TEXT DEFAULT ''",
+            "uuid": "ALTER TABLE users ADD COLUMN uuid TEXT DEFAULT ''",
+            "subscription_link": (
+                "ALTER TABLE users "
+                "ADD COLUMN subscription_link TEXT DEFAULT ''"
+            ),
+            "device_limit": (
+                "ALTER TABLE users "
+                "ADD COLUMN device_limit INTEGER DEFAULT 1"
+            ),
+            "blocked": (
+                "ALTER TABLE users "
+                "ADD COLUMN blocked INTEGER DEFAULT 0"
+            ),
+            "notify": (
+                "ALTER TABLE users "
+                "ADD COLUMN notify INTEGER DEFAULT 1"
+            ),
+        }
+
+        for column, sql in migrations.items():
+
+            if column not in columns:
+
+                try:
+                    db.execute(sql)
+                except sqlite3.OperationalError:
+                    pass
+
+        # ----------------------------------------------------
+        # MIGRATION PAYMENTS
+        # ----------------------------------------------------
+
+        payment_columns = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(payments)"
+            ).fetchall()
+        }
+
+        payment_migrations = {
+            "tariff": (
+                "ALTER TABLE payments "
+                "ADD COLUMN tariff TEXT DEFAULT ''"
+            ),
+            "stars": (
+                "ALTER TABLE payments "
+                "ADD COLUMN stars INTEGER DEFAULT 0"
+            ),
+            "days": (
+                "ALTER TABLE payments "
+                "ADD COLUMN days INTEGER DEFAULT 0"
+            ),
+            "telegram_charge_id": (
+                "ALTER TABLE payments "
+                "ADD COLUMN telegram_charge_id TEXT DEFAULT ''"
+            ),
+            "status": (
+                "ALTER TABLE payments "
+                "ADD COLUMN status TEXT DEFAULT 'pending'"
+            ),
+        }
+
+        for column, sql in payment_migrations.items():
+
+            if column not in payment_columns:
+
+                try:
+                    db.execute(sql)
+                except sqlite3.OperationalError:
+                    pass
+
+        # ====================================================
+        # ВОССТАНОВЛЕНИЕ ДАННЫХ
+        # ====================================================
+
+        users = db.execute(
+            "SELECT * FROM users"
+        ).fetchall()
+
+        for user in users:
+
+            user_id = user["user_id"]
+
+            # ------------------------------------------------
+            # TOKEN
+            # ------------------------------------------------
+
+            token = user["token"]
+
+            if not token:
+
+                new_token = generate_token()
+
+                # Проверяем уникальность
+                while db.execute(
+                    "SELECT 1 FROM users WHERE token = ?",
+                    (new_token,)
+                ).fetchone():
+
+                    new_token = generate_token()
+
+                db.execute(
+                    """
+                    UPDATE users
+                    SET token = ?
+                    WHERE user_id = ?
+                    """,
+                    (new_token, user_id)
+                )
+
+                token = new_token
+
+            # ------------------------------------------------
+            # UUID
+            # ------------------------------------------------
+
+            if not user["uuid"]:
+
+                db.execute(
+                    """
+                    UPDATE users
+                    SET uuid = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        generate_uuid(),
+                        user_id
+                    )
+                )
+
+            # ------------------------------------------------
+            # SUBSCRIPTION LINK
+            # ------------------------------------------------
+
+            link = user["subscription_link"]
+
+            if not link:
+
+                link = build_subscription_link(token)
+
+                db.execute(
+                    """
+                    UPDATE users
+                    SET subscription_link = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        link,
+                        user_id
+                    )
+                )
+
+            # ------------------------------------------------
+            # DEVICE LIMIT
+            # ------------------------------------------------
+
+            try:
+                if user["device_limit"] is None:
+                    db.execute(
+                        """
+                        UPDATE users
+                        SET device_limit = 1
+                        WHERE user_id = ?
+                        """,
+                        (user_id,)
+                    )
+            except Exception:
+                pass
+
+        db.commit()
+
+
+# ============================================================
+# USERS
+# ============================================================
 
 def create_user(
     user_id,
     username="",
-    first_name="",
+    first_name=""
 ):
 
-    db = connect()
-    cur = db.cursor()
+    existing = get_user(user_id)
 
-    cur.execute(
-        "SELECT * FROM users WHERE user_id=?",
-        (user_id,)
-    )
+    if existing:
+        return existing
 
-    user = cur.fetchone()
+    token = generate_token()
 
-    if user:
+    # Проверка уникальности токена
+    while True:
 
-        cur.execute("""
-            UPDATE users
-            SET
-                username=?,
-                first_name=?
-            WHERE user_id=?
-        """, (
-            username or "",
-            first_name or "",
-            user_id,
-        ))
+        with connect() as db:
+
+            exists = db.execute(
+                "SELECT 1 FROM users WHERE token = ?",
+                (token,)
+            ).fetchone()
+
+        if not exists:
+            break
+
+        token = generate_token()
+
+    user_uuid = generate_uuid()
+
+    subscription_link = build_subscription_link(token)
+
+    with connect() as db:
+
+        db.execute(
+            """
+            INSERT INTO users (
+                user_id,
+                username,
+                first_name,
+                token,
+                uuid,
+                subscription,
+                subscription_until,
+                subscription_link,
+                device_limit,
+                trial_used,
+                blocked,
+                notify,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                username or "",
+                first_name or "",
+                token,
+                user_uuid,
+                "none",
+                "",
+                subscription_link,
+                1,
+                0,
+                0,
+                1,
+                now_moscow_iso(),
+            )
+        )
 
         db.commit()
 
-        cur.execute(
-            "SELECT * FROM users WHERE user_id=?",
-            (user_id,)
-        )
-
-        user = cur.fetchone()
-
-        db.close()
-
-        return dict(user)
-
-    # --------------------------------------------------------
-    # НОВЫЙ ПОЛЬЗОВАТЕЛЬ
-    # --------------------------------------------------------
-
-    token = generate_token()
-    user_uuid = generate_uuid()
-
-    # Получаем PUBLIC_URL.
-    try:
-
-        from config import PUBLIC_URL
-
-        public_url = str(
-            PUBLIC_URL
-        ).rstrip("/")
-
-    except Exception:
-
-        public_url = ""
-
-    subscription_link = ""
-
-    if public_url:
-
-        subscription_link = (
-            f"{public_url}/sub/{token}"
-        )
-
-    cur.execute("""
-        INSERT INTO users (
-            user_id,
-            username,
-            first_name,
-            token,
-            uuid,
-            subscription,
-            subscription_until,
-            subscription_link,
-            device_limit,
-            trial_used,
-            blocked,
-            notify,
-            created_at
-        )
-        VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
-    """, (
-        user_id,
-        username or "",
-        first_name or "",
-        token,
-        user_uuid,
-        "none",
-        "",
-        subscription_link,
-        2,
-        0,
-        0,
-        1,
-        now_moscow_iso(),
-    ))
-
-    db.commit()
-
-    cur.execute(
-        "SELECT * FROM users WHERE user_id=?",
-        (user_id,)
-    )
-
-    user = cur.fetchone()
-
-    db.close()
-
-    return dict(user)
+    return get_user(user_id)
 
 
 def get_user(user_id):
 
-    db = connect()
-    cur = db.cursor()
+    with connect() as db:
 
-    cur.execute(
-        "SELECT * FROM users WHERE user_id=?",
-        (user_id,)
-    )
+        row = db.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchone()
 
-    row = cur.fetchone()
+    if not row:
+        return None
 
-    db.close()
-
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    return dict(row)
 
 
 def get_user_by_token(token):
 
-    db = connect()
-    cur = db.cursor()
+    if not token:
+        return None
 
-    cur.execute(
-        "SELECT * FROM users WHERE token=?",
-        (token,)
-    )
+    with connect() as db:
 
-    row = cur.fetchone()
+        row = db.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE token = ?
+            """,
+            (token,)
+        ).fetchone()
 
-    db.close()
+    if not row:
+        return None
 
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    return dict(row)
 
 
 def get_all_users():
 
-    db = connect()
-    cur = db.cursor()
+    with connect() as db:
 
-    cur.execute("""
-        SELECT *
-        FROM users
-        ORDER BY created_at DESC
-    """)
+        rows = db.execute(
+            """
+            SELECT *
+            FROM users
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
 
-    rows = cur.fetchall()
+    return [dict(row) for row in rows]
 
-    db.close()
 
-    return [
-        dict(row)
-        for row in rows
-    ]
+# ============================================================
+# SUBSCRIPTION LINK
+# ============================================================
+
+def save_subscription_link(user_id, link):
+
+    with connect() as db:
+
+        db.execute(
+            """
+            UPDATE users
+            SET subscription_link = ?
+            WHERE user_id = ?
+            """,
+            (
+                link,
+                user_id
+            )
+        )
+
+        db.commit()
+
+
+def get_subscription_link(user_id):
+
+    user = get_user(user_id)
+
+    if not user:
+        return ""
+
+    link = user.get("subscription_link")
+
+    if link:
+        return link
+
+    token = user.get("token")
+
+    if token:
+
+        link = build_subscription_link(token)
+
+        save_subscription_link(
+            user_id,
+            link
+        )
+
+        return link
+
+    return ""
 
 
 # ============================================================
@@ -666,163 +627,157 @@ def get_all_users():
 def extend_subscription(
     user_id,
     days,
-    tariff=None,
+    subscription="vip"
 ):
 
-    db = connect()
-    cur = db.cursor()
+    user = get_user(user_id)
 
-    cur.execute(
-        """
-        SELECT subscription_until
-        FROM users
-        WHERE user_id=?
-        """,
-        (user_id,)
-    )
-
-    row = cur.fetchone()
+    if not user:
+        return None
 
     now = now_moscow()
 
-    current = None
+    current_until = parse_datetime(
+        user.get("subscription_until")
+    )
 
-    if row and row["subscription_until"]:
+    if current_until and current_until > now:
+        start = current_until
+    else:
+        start = now
 
-        current = parse_datetime(
-            row["subscription_until"]
+    from datetime import timedelta
+
+    new_until = start + timedelta(days=int(days))
+
+    with connect() as db:
+
+        db.execute(
+            """
+            UPDATE users
+            SET
+                subscription = ?,
+                subscription_until = ?
+            WHERE user_id = ?
+            """,
+            (
+                subscription,
+                new_until.isoformat(),
+                user_id
+            )
         )
 
-    if not current or current < now:
+        db.commit()
 
-        current = now
-
-    new_date = (
-        current
-        + timedelta(days=days)
-    )
-
-    new_date = new_date.astimezone(
-        MOSCOW_TZ
-    )
-
-    cur.execute("""
-        UPDATE users
-        SET
-            subscription=?,
-            subscription_until=?,
-            blocked=0
-        WHERE user_id=?
-    """, (
-        tariff or "active",
-        new_date.isoformat(),
-        user_id,
-    ))
-
-    db.commit()
-    db.close()
-
-    return new_date
-
-
-def set_device_limit(
-    user_id,
-    limit,
-):
-
-    db = connect()
-
-    db.execute(
-        """
-        UPDATE users
-        SET device_limit=?
-        WHERE user_id=?
-        """,
-        (
-            int(limit),
-            user_id,
-        )
-    )
-
-    db.commit()
-    db.close()
-
-
-def block_user(
-    user_id,
-    blocked=True,
-):
-
-    db = connect()
-
-    db.execute(
-        """
-        UPDATE users
-        SET blocked=?
-        WHERE user_id=?
-        """,
-        (
-            1 if blocked else 0,
-            user_id,
-        )
-    )
-
-    db.commit()
-    db.close()
+    return get_user(user_id)
 
 
 def expire_old_subscriptions():
 
-    db = connect()
-
     now = now_moscow()
 
-    cur = db.cursor()
+    expired_count = 0
 
-    cur.execute("""
-        SELECT user_id, subscription_until
-        FROM users
-        WHERE subscription_until != ''
-          AND subscription != 'expired'
-    """)
+    users = get_all_users()
 
-    rows = cur.fetchall()
+    for user in users:
 
-    expired_ids = []
+        subscription = user.get("subscription")
 
-    for row in rows:
+        if subscription in (
+            "none",
+            "",
+            None
+        ):
+            continue
 
-        expire_dt = parse_datetime(
-            row["subscription_until"]
+        until = parse_datetime(
+            user.get("subscription_until")
         )
 
-        if (
-            expire_dt
-            and expire_dt <= now
-        ):
+        if not until:
+            continue
 
-            expired_ids.append(
-                row["user_id"]
-            )
+        if until <= now:
 
-    if expired_ids:
+            with connect() as db:
 
-        cur.executemany(
+                db.execute(
+                    """
+                    UPDATE users
+                    SET
+                        subscription = 'none',
+                        subscription_until = ''
+                    WHERE user_id = ?
+                    """,
+                    (
+                        user["user_id"],
+                    )
+                )
+
+                db.commit()
+
+            expired_count += 1
+
+    return expired_count
+
+
+# ============================================================
+# DEVICE LIMIT
+# ============================================================
+
+def set_device_limit(
+    user_id,
+    limit
+):
+
+    limit = max(1, int(limit))
+
+    with connect() as db:
+
+        db.execute(
             """
             UPDATE users
-            SET subscription='expired'
-            WHERE user_id=?
+            SET device_limit = ?
+            WHERE user_id = ?
             """,
-            [
-                (user_id,)
-                for user_id in expired_ids
-            ]
+            (
+                limit,
+                user_id
+            )
         )
 
-    db.commit()
-    db.close()
+        db.commit()
 
-    return len(expired_ids)
+    return get_user(user_id)
+
+
+# ============================================================
+# BLOCK
+# ============================================================
+
+def block_user(
+    user_id,
+    blocked=True
+):
+
+    with connect() as db:
+
+        db.execute(
+            """
+            UPDATE users
+            SET blocked = ?
+            WHERE user_id = ?
+            """,
+            (
+                1 if blocked else 0,
+                user_id
+            )
+        )
+
+        db.commit()
+
+    return get_user(user_id)
 
 
 # ============================================================
@@ -831,37 +786,26 @@ def expire_old_subscriptions():
 
 def use_trial(user_id):
 
-    db = connect()
+    user = get_user(user_id)
 
-    cur = db.cursor()
-
-    cur.execute(
-        """
-        SELECT trial_used
-        FROM users
-        WHERE user_id=?
-        """,
-        (user_id,)
-    )
-
-    row = cur.fetchone()
-
-    if not row or row["trial_used"]:
-
-        db.close()
-
+    if not user:
         return False
 
-    cur.execute("""
-        UPDATE users
-        SET trial_used=1
-        WHERE user_id=?
-    """, (
-        user_id,
-    ))
+    if user.get("trial_used"):
+        return False
 
-    db.commit()
-    db.close()
+    with connect() as db:
+
+        db.execute(
+            """
+            UPDATE users
+            SET trial_used = 1
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        )
+
+        db.commit()
 
     return True
 
@@ -874,118 +818,87 @@ def create_payment(
     user_id,
     tariff,
     stars,
-    days,
+    days
 ):
 
-    db = connect()
+    with connect() as db:
 
-    cur = db.cursor()
-
-    cur.execute("""
-        INSERT INTO payments (
-            user_id,
-            tariff,
-            stars,
-            days,
-            telegram_charge_id,
-            status,
-            created_at
+        cursor = db.execute(
+            """
+            INSERT INTO payments (
+                user_id,
+                tariff,
+                stars,
+                days,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                tariff,
+                int(stars),
+                int(days),
+                "pending",
+                now_moscow_iso(),
+            )
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user_id,
-        tariff,
-        stars,
-        days,
-        "",
-        "pending",
-        now_moscow_iso(),
-    ))
 
-    payment_id = cur.lastrowid
+        db.commit()
 
-    db.commit()
-    db.close()
-
-    return payment_id
+        return cursor.lastrowid
 
 
 def complete_payment(
     payment_id,
-    telegram_charge_id,
+    telegram_charge_id=""
 ):
 
-    db = connect()
+    with connect() as db:
 
-    cur = db.cursor()
+        payment = db.execute(
+            """
+            SELECT *
+            FROM payments
+            WHERE id = ?
+            """,
+            (payment_id,)
+        ).fetchone()
 
-    # --------------------------------------------------------
-    # ВАЖНО:
-    # Не даём один платёж провести повторно.
-    # --------------------------------------------------------
+        if not payment:
+            return None
 
-    cur.execute("""
-        SELECT *
-        FROM payments
-        WHERE id=?
-    """, (
-        payment_id,
-    ))
+        # Защита от повторной оплаты
+        if payment["status"] == "paid":
+            return dict(payment)
 
-    existing = cur.fetchone()
+        db.execute(
+            """
+            UPDATE payments
+            SET
+                status = 'paid',
+                telegram_charge_id = ?
+            WHERE id = ?
+            """,
+            (
+                telegram_charge_id or "",
+                payment_id
+            )
+        )
 
-    if not existing:
+        db.commit()
 
-        db.close()
+        payment = db.execute(
+            """
+            SELECT *
+            FROM payments
+            WHERE id = ?
+            """,
+            (payment_id,)
+        ).fetchone()
 
-        return None
-
-    if existing["status"] == "paid":
-
-        db.close()
-
-        return None
-
-    # --------------------------------------------------------
-    # ОПЛАЧИВАЕМ
-    # --------------------------------------------------------
-
-    cur.execute("""
-        UPDATE payments
-        SET
-            status='paid',
-            telegram_charge_id=?
-        WHERE id=?
-          AND status='pending'
-    """, (
-        telegram_charge_id,
-        payment_id,
-    ))
-
-    db.commit()
-
-    # --------------------------------------------------------
-    # ПОЛУЧАЕМ ОБНОВЛЁННЫЙ ПЛАТЁЖ
-    # --------------------------------------------------------
-
-    cur.execute(
-        """
-        SELECT *
-        FROM payments
-        WHERE id=?
-        """,
-        (payment_id,)
-    )
-
-    row = cur.fetchone()
-
-    db.close()
-
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    return dict(payment) if payment else None
 
 
 # ============================================================
@@ -995,106 +908,87 @@ def complete_payment(
 def create_promo(
     code,
     days,
-    max_uses=1,
+    max_uses=1
 ):
 
-    db = connect()
+    code = str(code).strip().upper()
 
-    try:
+    with connect() as db:
 
-        db.execute("""
+        existing = db.execute(
+            """
+            SELECT code
+            FROM promocodes
+            WHERE code = ?
+            """,
+            (code,)
+        ).fetchone()
+
+        if existing:
+            return False
+
+        db.execute(
+            """
             INSERT INTO promocodes (
                 code,
                 days,
-                max_uses,
                 uses,
+                max_uses,
                 created_at
             )
             VALUES (?, ?, ?, ?, ?)
-        """, (
-            code.strip().upper(),
-            int(days),
-            int(max_uses),
-            0,
-            now_moscow_iso(),
-        ))
+            """,
+            (
+                code,
+                int(days),
+                0,
+                int(max_uses),
+                now_moscow_iso(),
+            )
+        )
 
         db.commit()
 
-        result = True
-
-    except sqlite3.IntegrityError:
-
-        result = False
-
-    db.close()
-
-    return result
+    return True
 
 
-def use_promo(code):
+def use_promo(
+    user_id,
+    code
+):
 
-    db = connect()
+    code = str(code).strip().upper()
 
-    cur = db.cursor()
+    with connect() as db:
 
-    code = (
-        code
-        .strip()
-        .upper()
-    )
+        promo = db.execute(
+            """
+            SELECT *
+            FROM promocodes
+            WHERE code = ?
+            """,
+            (code,)
+        ).fetchone()
 
-    cur.execute(
-        """
-        SELECT *
-        FROM promocodes
-        WHERE code=?
-        """,
-        (code,)
-    )
+        if not promo:
+            return False
 
-    promo = cur.fetchone()
+        if promo["uses"] >= promo["max_uses"]:
+            return False
 
-    if not promo:
+        # Увеличиваем использование
+        db.execute(
+            """
+            UPDATE promocodes
+            SET uses = uses + 1
+            WHERE code = ?
+            """,
+            (code,)
+        )
 
-        db.close()
+        db.commit()
 
-        return None
-
-    # --------------------------------------------------------
-    # ПРОВЕРЯЕМ ЛИМИТ
-    # --------------------------------------------------------
-
-    if promo["uses"] >= promo["max_uses"]:
-
-        db.close()
-
-        return None
-
-    # --------------------------------------------------------
-    # УВЕЛИЧИВАЕМ USES
-    # --------------------------------------------------------
-
-    cur.execute("""
-        UPDATE promocodes
-        SET uses=uses+1
-        WHERE code=?
-          AND uses < max_uses
-    """, (
-        code,
-    ))
-
-    if cur.rowcount == 0:
-
-        db.close()
-
-        return None
-
-    db.commit()
-
-    db.close()
-
-    return dict(promo)
+    return int(promo["days"])
 
 
 # ============================================================
@@ -1103,74 +997,77 @@ def use_promo(code):
 
 def add_node(
     name,
-    vless_link,
+    vless_link
 ):
 
-    db = connect()
+    with connect() as db:
 
-    cur = db.cursor()
-
-    cur.execute("""
-        INSERT INTO nodes (
-            name,
-            vless_link,
-            enabled,
-            created_at
+        cursor = db.execute(
+            """
+            INSERT INTO nodes (
+                name,
+                vless_link,
+                enabled,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                name,
+                vless_link,
+                1,
+                now_moscow_iso(),
+            )
         )
-        VALUES (?, ?, ?, ?)
-    """, (
-        name,
-        vless_link,
-        1,
-        now_moscow_iso(),
-    ))
 
-    db.commit()
+        db.commit()
 
-    node_id = cur.lastrowid
-
-    db.close()
-
-    return node_id
+        return cursor.lastrowid
 
 
 def delete_node(node_id):
 
-    db = connect()
+    with connect() as db:
 
-    db.execute(
-        """
-        DELETE FROM nodes
-        WHERE id=?
-        """,
-        (node_id,)
-    )
+        db.execute(
+            """
+            DELETE FROM nodes
+            WHERE id = ?
+            """,
+            (node_id,)
+        )
 
-    db.commit()
-    db.close()
+        db.commit()
 
 
-def get_nodes():
+def get_nodes(
+    enabled_only=False
+):
 
-    db = connect()
+    with connect() as db:
 
-    cur = db.cursor()
+        if enabled_only:
 
-    cur.execute("""
-        SELECT *
-        FROM nodes
-        WHERE enabled=1
-        ORDER BY id
-    """)
+            rows = db.execute(
+                """
+                SELECT *
+                FROM nodes
+                WHERE enabled = 1
+                ORDER BY id ASC
+                """
+            ).fetchall()
 
-    rows = cur.fetchall()
+        else:
 
-    db.close()
+            rows = db.execute(
+                """
+                SELECT *
+                FROM nodes
+                ORDER BY id ASC
+                """
+            ).fetchall()
 
-    return [
-        dict(row)
-        for row in rows
-    ]
+    return [dict(row) for row in rows]
 
 
 # ============================================================
@@ -1180,268 +1077,209 @@ def get_nodes():
 def add_device(
     user_id,
     device_id,
-    device_name="",
+    device_name=""
 ):
 
-    db = connect()
+    device_id = str(device_id)
 
-    cur = db.cursor()
+    with connect() as db:
 
-    # --------------------------------------------------------
-    # ИЩЕМ УЖЕ СУЩЕСТВУЮЩЕЕ УСТРОЙСТВО
-    # --------------------------------------------------------
+        existing = db.execute(
+            """
+            SELECT *
+            FROM devices
+            WHERE user_id = ?
+            AND device_id = ?
+            """,
+            (
+                user_id,
+                device_id
+            )
+        ).fetchone()
 
-    cur.execute("""
-        SELECT *
-        FROM devices
-        WHERE user_id=?
-          AND device_id=?
-    """, (
-        user_id,
-        device_id,
-    ))
+        if existing:
 
-    existing = cur.fetchone()
+            db.execute(
+                """
+                UPDATE devices
+                SET
+                    device_name = ?,
+                    last_seen = ?
+                WHERE user_id = ?
+                AND device_id = ?
+                """,
+                (
+                    device_name or "",
+                    now_moscow_iso(),
+                    user_id,
+                    device_id
+                )
+            )
 
-    if existing:
+            db.commit()
 
-        cur.execute("""
-            UPDATE devices
-            SET
-                device_name=?,
-                last_seen=?
-            WHERE user_id=?
-              AND device_id=?
-        """, (
-            device_name or "",
-            now_moscow_iso(),
-            user_id,
-            device_id,
-        ))
+            return True
+
+        # ----------------------------------------------------
+        # Проверка лимита
+        # ----------------------------------------------------
+
+        user = db.execute(
+            """
+            SELECT device_limit
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            return False
+
+        limit = user["device_limit"] or 1
+
+        count = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM devices
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchone()[0]
+
+        if count >= limit:
+            return False
+
+        # ----------------------------------------------------
+        # Добавляем устройство
+        # ----------------------------------------------------
+
+        db.execute(
+            """
+            INSERT INTO devices (
+                user_id,
+                device_id,
+                device_name,
+                last_seen
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                device_id,
+                device_name or "",
+                now_moscow_iso(),
+            )
+        )
 
         db.commit()
-        db.close()
-
-        return True
-
-    # --------------------------------------------------------
-    # ПОЛУЧАЕМ ЛИМИТ
-    # --------------------------------------------------------
-
-    cur.execute(
-        """
-        SELECT device_limit
-        FROM users
-        WHERE user_id=?
-        """,
-        (user_id,)
-    )
-
-    user = cur.fetchone()
-
-    limit = (
-        user["device_limit"]
-        if user
-        else 2
-    )
-
-    # --------------------------------------------------------
-    # СЧИТАЕМ УСТРОЙСТВА
-    # --------------------------------------------------------
-
-    cur.execute("""
-        SELECT COUNT(*) AS count
-        FROM devices
-        WHERE user_id=?
-    """, (
-        user_id,
-    ))
-
-    count = cur.fetchone()["count"]
-
-    if count >= limit:
-
-        db.close()
-
-        return False
-
-    # --------------------------------------------------------
-    # ДОБАВЛЯЕМ
-    # --------------------------------------------------------
-
-    cur.execute("""
-        INSERT INTO devices (
-            user_id,
-            device_id,
-            device_name,
-            last_seen
-        )
-        VALUES (?, ?, ?, ?)
-    """, (
-        user_id,
-        device_id,
-        device_name or "",
-        now_moscow_iso(),
-    ))
-
-    db.commit()
-    db.close()
 
     return True
 
 
 def get_devices(user_id):
 
-    db = connect()
+    with connect() as db:
 
-    cur = db.cursor()
+        rows = db.execute(
+            """
+            SELECT *
+            FROM devices
+            WHERE user_id = ?
+            ORDER BY last_seen DESC
+            """,
+            (user_id,)
+        ).fetchall()
 
-    cur.execute("""
-        SELECT *
-        FROM devices
-        WHERE user_id=?
-        ORDER BY last_seen DESC
-    """, (
-        user_id,
-    ))
-
-    rows = cur.fetchall()
-
-    db.close()
-
-    return [
-        dict(row)
-        for row in rows
-    ]
+    return [dict(row) for row in rows]
 
 
 def delete_device(
     user_id,
-    device_id,
+    device_id
 ):
 
-    db = connect()
+    with connect() as db:
 
-    db.execute("""
-        DELETE FROM devices
-        WHERE user_id=?
-          AND device_id=?
-    """, (
-        user_id,
-        device_id,
-    ))
+        db.execute(
+            """
+            DELETE FROM devices
+            WHERE user_id = ?
+            AND device_id = ?
+            """,
+            (
+                user_id,
+                device_id
+            )
+        )
 
-    db.commit()
-    db.close()
+        db.commit()
+
+    return True
 
 
 # ============================================================
-# STATISTICS
+# СТАТИСТИКА
 # ============================================================
 
 def get_stats():
 
-    db = connect()
-    cur = db.cursor()
+    with connect() as db:
 
-    now = now_moscow()
+        users = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            """
+        ).fetchone()[0]
 
-    # --------------------------------------------------------
-    # ВСЕ ПОЛЬЗОВАТЕЛИ
-    # --------------------------------------------------------
+        active = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE subscription != 'none'
+            AND subscription != ''
+            AND subscription_until != ''
+            """
+        ).fetchone()[0]
 
-    cur.execute("""
-        SELECT COUNT(*) AS c
-        FROM users
-    """)
+        blocked = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE blocked = 1
+            """
+        ).fetchone()[0]
 
-    users = cur.fetchone()["c"]
+        payments = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM payments
+            WHERE status = 'paid'
+            """
+        ).fetchone()[0]
 
-    # --------------------------------------------------------
-    # АКТИВНЫЕ
-    # --------------------------------------------------------
+        stars = db.execute(
+            """
+            SELECT COALESCE(SUM(stars), 0)
+            FROM payments
+            WHERE status = 'paid'
+            """
+        ).fetchone()[0]
 
-    cur.execute("""
-        SELECT
-            user_id,
-            subscription_until
-        FROM users
-        WHERE subscription_until != ''
-    """)
+        devices = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM devices
+            """
+        ).fetchone()[0]
 
-    active = 0
-
-    for row in cur.fetchall():
-
-        expire_dt = parse_datetime(
-            row["subscription_until"]
-        )
-
-        if (
-            expire_dt
-            and expire_dt > now
-        ):
-            active += 1
-
-    # --------------------------------------------------------
-    # ЗАБЛОКИРОВАННЫЕ
-    # --------------------------------------------------------
-
-    cur.execute("""
-        SELECT COUNT(*) AS c
-        FROM users
-        WHERE blocked=1
-    """)
-
-    blocked = cur.fetchone()["c"]
-
-    # --------------------------------------------------------
-    # ПЛАТЕЖИ
-    # --------------------------------------------------------
-
-    cur.execute("""
-        SELECT COUNT(*) AS c
-        FROM payments
-        WHERE status='paid'
-    """)
-
-    payments = cur.fetchone()["c"]
-
-    # --------------------------------------------------------
-    # STARS
-    # --------------------------------------------------------
-
-    cur.execute("""
-        SELECT COALESCE(SUM(stars), 0) AS s
-        FROM payments
-        WHERE status='paid'
-    """)
-
-    stars = cur.fetchone()["s"]
-
-    # --------------------------------------------------------
-    # УСТРОЙСТВА
-    # --------------------------------------------------------
-
-    cur.execute("""
-        SELECT COUNT(*) AS c
-        FROM devices
-    """)
-
-    devices = cur.fetchone()["c"]
-
-    # --------------------------------------------------------
-    # ПРОМОКОДЫ
-    # --------------------------------------------------------
-
-    cur.execute("""
-        SELECT COUNT(*) AS c
-        FROM promocodes
-    """)
-
-    promocodes = cur.fetchone()["c"]
-
-    db.close()
+        promocodes = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM promocodes
+            """
+        ).fetchone()[0]
 
     return {
         "users": users,
@@ -1455,15 +1293,7 @@ def get_stats():
 
 
 # ============================================================
-# CURRENT MOSCOW TIME
-# ============================================================
-
-def get_moscow_time():
-    return now_moscow()
-
-
-# ============================================================
-# INIT DATABASE
+# ЗАПУСК ИНИЦИАЛИЗАЦИИ
 # ============================================================
 
 init_db()
