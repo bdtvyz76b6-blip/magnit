@@ -1,5 +1,4 @@
 import asyncio
-import html
 import os
 from datetime import datetime
 
@@ -8,10 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import (
-    ADMIN_ID,
-    SERVICE_NAME,
-)
+from config import ADMIN_ID, SERVICE_NAME
 
 from database import (
     get_user,
@@ -28,14 +24,11 @@ from database import (
     set_device_limit,
 )
 
-from subscription import (
-    sync_all_active_users,
-    sync_servers_update,
-)
+from subscription import sync_all_active_users
 
 
 # ============================================================
-# НАСТРОЙКИ
+# ADMIN IDS
 # ============================================================
 
 ADMIN_IDS = set()
@@ -46,33 +39,15 @@ try:
 except Exception:
     pass
 
-# Можно добавить несколько админов через .env:
-#
-# ADMIN_IDS=123456789,987654321
-#
-env_admin_ids = os.getenv(
-    "ADMIN_IDS",
-    "",
-).strip()
+for value in os.getenv("ADMIN_IDS", "").split(","):
+    value = value.strip()
 
-if env_admin_ids:
-
-    for value in env_admin_ids.split(","):
-
-        value = value.strip()
-
-        if not value:
-            continue
-
+    if value:
         try:
             ADMIN_IDS.add(int(value))
         except ValueError:
             pass
 
-
-# ============================================================
-# ADMIN CHECK
-# ============================================================
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -82,98 +57,80 @@ def is_admin(user_id: int) -> bool:
 # HELPERS
 # ============================================================
 
-def format_date(value):
+def value(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
 
-    if not value:
+    try:
+        return obj[key]
+    except Exception:
+        return default
+
+
+def fmt_date(value_):
+    if not value_:
         return "—"
 
     try:
-
-        dt = datetime.fromisoformat(
-            str(value)
-        )
-
-        return dt.strftime(
-            "%d.%m.%Y %H:%M"
-        )
-
+        return datetime.fromisoformat(
+            str(value_)
+        ).strftime("%d.%m.%Y %H:%M")
     except Exception:
-
-        return str(value)
-
-
-def safe(value):
-
-    if value is None:
-        return ""
-
-    return html.escape(
-        str(value)
-    )
+        return str(value_)
 
 
-def admin_menu():
+def admin_keyboard():
 
     kb = InlineKeyboardBuilder()
 
     kb.button(
         text="📊 Статистика",
-        callback_data="adm:stats",
+        callback_data="admin:stats",
     )
 
     kb.button(
         text="👥 Пользователи",
-        callback_data="adm:users",
+        callback_data="admin:users",
     )
 
     kb.button(
         text="🔎 Найти пользователя",
-        callback_data="adm:find",
-    )
-
-    kb.button(
-        text="💳 Платежи",
-        callback_data="adm:payments",
-    )
-
-    kb.button(
-        text="🎟 Промокоды",
-        callback_data="adm:promo",
-    )
-
-    kb.button(
-        text="📡 Серверы",
-        callback_data="adm:nodes",
-    )
-
-    kb.button(
-        text="📱 Устройства",
-        callback_data="adm:devices",
-    )
-
-    kb.button(
-        text="🚫 Блокировка",
-        callback_data="adm:block",
+        callback_data="admin:find",
     )
 
     kb.button(
         text="🎁 Выдать подписку",
-        callback_data="adm:give",
+        callback_data="admin:give",
+    )
+
+    kb.button(
+        text="📱 Устройства",
+        callback_data="admin:devices",
+    )
+
+    kb.button(
+        text="📡 Серверы",
+        callback_data="admin:nodes",
+    )
+
+    kb.button(
+        text="🎟 Промокоды",
+        callback_data="admin:promo",
+    )
+
+    kb.button(
+        text="🚫 Блокировка",
+        callback_data="admin:block",
     )
 
     kb.button(
         text="📢 Рассылка",
-        callback_data="adm:broadcast",
+        callback_data="admin:broadcast",
     )
 
     kb.button(
         text="🔄 Синхронизация",
-        callback_data="adm:sync",
-    )
-
-    kb.button(
-        text="⚙️ Настройки",
-        callback_data="adm:settings",
+        callback_data="admin:sync",
     )
 
     kb.adjust(
@@ -182,1644 +139,1182 @@ def admin_menu():
         2,
         2,
         2,
-        2,
-    )
-
-    return kb.as_markup()
-
-
-def back_admin_keyboard():
-
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="⬅️ Админ-панель",
-        callback_data="adm:home",
-    )
-
-    return kb.as_markup()
-
-
-# ============================================================
-# ADMIN HOME
-# ============================================================
-
-@dp.message(Command("admin"))
-async def admin_command(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    await message.answer(
-        f"👑 <b>{safe(SERVICE_NAME)}</b>\n\n"
-        "Админ-панель\n\n"
-        "Выбери раздел:",
-        reply_markup=admin_menu(),
-        parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data == "adm:home")
-async def admin_home(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.message.edit_text(
-        f"👑 <b>{safe(SERVICE_NAME)}</b>\n\n"
-        "Админ-панель\n\n"
-        "Выбери раздел:",
-        reply_markup=admin_menu(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-# ============================================================
-# STATISTICS
-# ============================================================
-
-@dp.callback_query(F.data == "adm:stats")
-async def admin_stats(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        stats = get_stats()
-
-        users = stats.get(
-            "users",
-            0,
-        )
-
-        active = stats.get(
-            "active",
-            0,
-        )
-
-        payments = stats.get(
-            "payments",
-            0,
-        )
-
-        stars = stats.get(
-            "stars",
-            0,
-        )
-
-        text = (
-            "📊 <b>СТАТИСТИКА</b>\n\n"
-            f"👥 Пользователей: "
-            f"<b>{users}</b>\n"
-            f"🟢 Активных: "
-            f"<b>{active}</b>\n"
-            f"💳 Платежей: "
-            f"<b>{payments}</b>\n"
-            f"⭐ Получено Stars: "
-            f"<b>{stars}</b>\n"
-        )
-
-    except Exception as e:
-
-        text = (
-            "❌ <b>Ошибка статистики</b>\n\n"
-            f"<code>{safe(e)}</code>"
-        )
-
-    await call.message.edit_text(
-        text,
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-# ============================================================
-# USERS
-# ============================================================
-
-@dp.callback_query(F.data == "adm:users")
-async def admin_users(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        users = get_all_users()
-
-    except Exception as e:
-
-        await call.message.edit_text(
-            f"❌ Ошибка:\n<code>{safe(e)}</code>",
-            reply_markup=back_admin_keyboard(),
-            parse_mode="HTML",
-        )
-
-        await call.answer()
-
-        return
-
-    text = (
-        "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n"
-        f"Всего: <b>{len(users)}</b>\n\n"
-    )
-
-    for user in users[:30]:
-
-        user_id = user.get(
-            "user_id",
-            "—",
-        )
-
-        username = (
-            user.get("username")
-            or user.get("first_name")
-            or "Без имени"
-        )
-
-        subscription = (
-            user.get("subscription")
-            or "none"
-        )
-
-        until = format_date(
-            user.get(
-                "subscription_until"
-            )
-        )
-
-        text += (
-            f"👤 <b>{safe(username)}</b>\n"
-            f"🆔 <code>{user_id}</code>\n"
-            f"📦 {safe(subscription)}\n"
-            f"📅 {until}\n\n"
-        )
-
-    if len(users) > 30:
-
-        text += (
-            f"… и ещё "
-            f"{len(users) - 30} пользователей."
-        )
-
-    await call.message.edit_text(
-        text,
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-# ============================================================
-# FIND USER
-# ============================================================
-
-@dp.callback_query(F.data == "adm:find")
-async def admin_find_help(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.message.answer(
-        "🔎 <b>Поиск пользователя</b>\n\n"
-        "Используй команду:\n"
-        "<code>/user USER_ID</code>\n\n"
-        "Например:\n"
-        "<code>/user 123456789</code>",
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.message(Command("user"))
-async def admin_user(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-
-        await message.answer(
-            "Использование:\n"
-            "<code>/user USER_ID</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    try:
-
-        user_id = int(
-            parts[1]
-        )
-
-    except ValueError:
-
-        await message.answer(
-            "❌ ID должен быть числом."
-        )
-
-        return
-
-    user = get_user(
-        user_id
-    )
-
-    if not user:
-
-        await message.answer(
-            "❌ Пользователь не найден."
-        )
-
-        return
-
-    devices = get_devices(
-        user_id
-    )
-
-    username = (
-        user.get("username")
-        or "—"
-    )
-
-    first_name = (
-        user.get("first_name")
-        or "—"
-    )
-
-    text = (
-        "👤 <b>ПОЛЬЗОВАТЕЛЬ</b>\n\n"
-        f"🆔 ID: "
-        f"<code>{user_id}</code>\n"
-        f"👤 Username: "
-        f"<b>{safe(username)}</b>\n"
-        f"📛 Имя: "
-        f"{safe(first_name)}\n\n"
-        f"📦 Подписка: "
-        f"<b>{safe(user.get('subscription', 'none'))}</b>\n"
-        f"📅 До: "
-        f"<b>{format_date(user.get('subscription_until'))}</b>\n"
-        f"📱 Устройства: "
-        f"<b>{len(devices)}</b>/"
-        f"<b>{user.get('device_limit', 1)}</b>\n"
-        f"🚫 Заблокирован: "
-        f"<b>{'Да' if user.get('blocked') else 'Нет'}</b>\n"
-    )
-
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="🎁 +30 дней",
-        callback_data=f"adm:give30:{user_id}",
-    )
-
-    kb.button(
-        text="🎁 +90 дней",
-        callback_data=f"adm:give90:{user_id}",
-    )
-
-    kb.button(
-        text="🚫 Заблокировать",
-        callback_data=f"adm:blockuser:{user_id}",
-    )
-
-    kb.button(
-        text="🔓 Разблокировать",
-        callback_data=f"adm:unblockuser:{user_id}",
-    )
-
-    kb.button(
-        text="📱 Устройства",
-        callback_data=f"adm:userdevices:{user_id}",
-    )
-
-    kb.button(
-        text="⬅️ Админ-панель",
-        callback_data="adm:home",
-    )
-
-    kb.adjust(2, 2, 1, 1)
-
-    await message.answer(
-        text,
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
-    )
-
-
-# ============================================================
-# GIVE SUBSCRIPTION
-# ============================================================
-
-@dp.callback_query(
-    F.data.startswith("adm:give")
-)
-async def admin_give_buttons(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    parts = call.data.split(":")
-
-    if len(parts) != 3:
-
-        await call.answer(
-            "Ошибка",
-            show_alert=True,
-        )
-
-        return
-
-    action = parts[1]
-
-    try:
-
-        user_id = int(parts[2])
-
-    except ValueError:
-
-        await call.answer(
-            "Неверный ID",
-            show_alert=True,
-        )
-
-        return
-
-    if action == "give30":
-
-        days = 30
-
-    elif action == "give90":
-
-        days = 90
-
-    else:
-
-        await call.answer(
-            "Неизвестная команда",
-            show_alert=True,
-        )
-
-        return
-
-    user = get_user(
-        user_id
-    )
-
-    if not user:
-
-        await call.answer(
-            "Пользователь не найден",
-            show_alert=True,
-        )
-
-        return
-
-    try:
-
-        date = extend_subscription(
-            user_id,
-            days,
-            "admin",
-        )
-
-        await call.answer(
-            f"Выдано {days} дней",
-        )
-
-        await call.message.answer(
-            "✅ <b>Подписка выдана</b>\n\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"➕ Дней: <b>{days}</b>\n"
-            f"📅 До: "
-            f"<b>{format_date(date.isoformat())}</b>",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await call.answer(
-            "Ошибка",
-            show_alert=True,
-        )
-
-        await call.message.answer(
-            f"❌ <code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-@dp.callback_query(F.data == "adm:give")
-async def admin_give_help(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.message.answer(
-        "🎁 <b>Выдать подписку</b>\n\n"
-        "Команда:\n"
-        "<code>/give USER_ID DAYS</code>\n\n"
-        "Например:\n"
-        "<code>/give 123456789 30</code>",
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.message(Command("give"))
-async def admin_give_command(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 3:
-
-        await message.answer(
-            "Использование:\n"
-            "<code>/give USER_ID DAYS</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    try:
-
-        user_id = int(parts[1])
-        days = int(parts[2])
-
-    except ValueError:
-
-        await message.answer(
-            "❌ ID и дни должны быть числами."
-        )
-
-        return
-
-    if days <= 0:
-
-        await message.answer(
-            "❌ Количество дней должно быть больше 0."
-        )
-
-        return
-
-    user = get_user(
-        user_id
-    )
-
-    if not user:
-
-        await message.answer(
-            "❌ Пользователь не найден."
-        )
-
-        return
-
-    try:
-
-        date = extend_subscription(
-            user_id,
-            days,
-            "admin",
-        )
-
-        await message.answer(
-            "✅ <b>Подписка выдана</b>\n\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"➕ Дней: <b>{days}</b>\n"
-            f"📅 До: "
-            f"<b>{format_date(date.isoformat())}</b>",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await message.answer(
-            f"❌ Ошибка:\n"
-            f"<code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-# ============================================================
-# BLOCK / UNBLOCK
-# ============================================================
-
-@dp.callback_query(F.data == "adm:block")
-async def admin_block_help(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.message.answer(
-        "🚫 <b>Блокировка</b>\n\n"
-        "<code>/block USER_ID</code>\n"
-        "<code>/unblock USER_ID</code>",
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.message(Command("block"))
-async def admin_block_command(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-
-        await message.answer(
-            "<code>/block USER_ID</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    try:
-
-        user_id = int(parts[1])
-
-    except ValueError:
-
-        await message.answer(
-            "❌ Неверный ID."
-        )
-
-        return
-
-    try:
-
-        block_user(
-            user_id,
-            True,
-        )
-
-        await message.answer(
-            f"🚫 Пользователь "
-            f"<code>{user_id}</code> "
-            f"заблокирован.",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await message.answer(
-            f"❌ <code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-@dp.message(Command("unblock"))
-async def admin_unblock_command(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-
-        await message.answer(
-            "<code>/unblock USER_ID</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    try:
-
-        user_id = int(parts[1])
-
-    except ValueError:
-
-        await message.answer(
-            "❌ Неверный ID."
-        )
-
-        return
-
-    try:
-
-        block_user(
-            user_id,
-            False,
-        )
-
-        await message.answer(
-            f"🔓 Пользователь "
-            f"<code>{user_id}</code> "
-            f"разблокирован.",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await message.answer(
-            f"❌ <code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-# ============================================================
-# BLOCK USER BUTTON
-# ============================================================
-
-@dp.callback_query(
-    F.data.startswith("adm:blockuser:")
-)
-async def admin_block_user_button(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        user_id = int(
-            call.data.split(":")[-1]
-        )
-
-        block_user(
-            user_id,
-            True,
-        )
-
-        await call.answer(
-            "Пользователь заблокирован",
-            show_alert=True,
-        )
-
-    except Exception as e:
-
-        await call.answer(
-            f"Ошибка: {str(e)[:100]}",
-            show_alert=True,
-        )
-
-
-@dp.callback_query(
-    F.data.startswith("adm:unblockuser:")
-)
-async def admin_unblock_user_button(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        user_id = int(
-            call.data.split(":")[-1]
-        )
-
-        block_user(
-            user_id,
-            False,
-        )
-
-        await call.answer(
-            "Пользователь разблокирован",
-            show_alert=True,
-        )
-
-    except Exception as e:
-
-        await call.answer(
-            f"Ошибка: {str(e)[:100]}",
-            show_alert=True,
-        )
-
-
-# ============================================================
-# SERVERS
-# ============================================================
-
-@dp.callback_query(F.data == "adm:nodes")
-async def admin_nodes(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        nodes = get_nodes()
-
-    except Exception as e:
-
-        await call.message.edit_text(
-            f"❌ Ошибка:\n"
-            f"<code>{safe(e)}</code>",
-            reply_markup=back_admin_keyboard(),
-            parse_mode="HTML",
-        )
-
-        await call.answer()
-
-        return
-
-    text = (
-        "📡 <b>VPN СЕРВЕРЫ</b>\n\n"
-    )
-
-    if not nodes:
-
-        text += (
-            "Серверов пока нет.\n\n"
-        )
-
-    for node in nodes:
-
-        text += (
-            f"🖥 <b>#{node['id']} "
-            f"{safe(node['name'])}</b>\n"
-            f"<code>{safe(node['vless_link'])}</code>\n\n"
-        )
-
-    text += (
-        "➕ Добавить:\n"
-        "<code>/addnode Название|VLESS</code>\n\n"
-        "🗑 Удалить:\n"
-        "<code>/delnode ID</code>"
-    )
-
-    await call.message.edit_text(
-        text,
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.message(Command("addnode"))
-async def admin_add_node(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    value = message.text[
-        len("/addnode"):
-    ].strip()
-
-    if "|" not in value:
-
-        await message.answer(
-            "Формат:\n"
-            "<code>/addnode Название|VLESS-ссылка</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    name, link = value.split(
-        "|",
         1,
     )
 
-    name = name.strip()
-    link = link.strip()
-
-    if not name or not link:
-
-        await message.answer(
-            "❌ Название и VLESS-ссылка обязательны."
-        )
-
-        return
-
-    try:
-
-        node_id = add_node(
-            name,
-            link,
-        )
-
-        await message.answer(
-            f"✅ Сервер добавлен.\n\n"
-            f"🆔 ID: <code>{node_id}</code>\n"
-            f"📡 {safe(name)}",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await message.answer(
-            f"❌ Ошибка:\n"
-            f"<code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
+    return kb.as_markup()
 
 
-@dp.message(Command("delnode"))
-async def admin_delete_node(
-    message: Message,
-):
+def back_keyboard():
 
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
+    kb = InlineKeyboardBuilder()
 
-    value = message.text[
-        len("/delnode"):
-    ].strip()
-
-    try:
-
-        node_id = int(value)
-
-    except ValueError:
-
-        await message.answer(
-            "Использование:\n"
-            "<code>/delnode ID</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    try:
-
-        delete_node(
-            node_id
-        )
-
-        await message.answer(
-            f"✅ Сервер "
-            f"<code>{node_id}</code> удалён.",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await message.answer(
-            f"❌ Ошибка:\n"
-            f"<code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-# ============================================================
-# PROMOCODES
-# ============================================================
-
-@dp.callback_query(F.data == "adm:promo")
-async def admin_promo(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.message.edit_text(
-        "🎟 <b>ПРОМОКОДЫ</b>\n\n"
-        "Создание промокода:\n\n"
-        "<code>/promo КОД ДНИ МАКС_АКТИВАЦИЙ</code>\n\n"
-        "Пример:\n"
-        "<code>/promo MAGNIT100 30 10</code>\n\n"
-        "Где:\n"
-        "• MAGNIT100 — код\n"
-        "• 30 — дней\n"
-        "• 10 — максимум активаций",
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
+    kb.button(
+        text="⬅️ Админ-панель",
+        callback_data="admin:home",
     )
 
-    await call.answer()
+    return kb.as_markup()
 
 
-@dp.message(Command("promo"))
-async def admin_create_promo(
-    message: Message,
-):
+# ============================================================
+# REGISTER
+# ============================================================
 
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
+def register_admin_handlers(dp):
 
-    parts = message.text.split()
+    # ========================================================
+    # ADMIN
+    # ========================================================
 
-    if len(parts) != 4:
+    @dp.message(Command("admin"))
+    async def admin_command(message: Message):
+
+        if not is_admin(message.from_user.id):
+            return
 
         await message.answer(
-            "Формат:\n"
-            "<code>/promo КОД ДНИ МАКС_АКТИВАЦИЙ</code>",
+            f"👑 <b>{SERVICE_NAME}</b>\n\n"
+            "Админ-панель\n\n"
+            "Выберите раздел:",
+            reply_markup=admin_keyboard(),
             parse_mode="HTML",
         )
 
-        return
 
-    _, code, days, max_uses = parts
+    # ========================================================
+    # HOME
+    # ========================================================
 
-    try:
+    @dp.callback_query(F.data == "admin:home")
+    async def admin_home(call: CallbackQuery):
 
-        days = int(days)
-        max_uses = int(max_uses)
+        if not is_admin(call.from_user.id):
+            return
 
-    except ValueError:
-
-        await message.answer(
-            "❌ Дни и количество активаций "
-            "должны быть числами."
+        await call.message.edit_text(
+            f"👑 <b>{SERVICE_NAME}</b>\n\n"
+            "Админ-панель\n\n"
+            "Выберите раздел:",
+            reply_markup=admin_keyboard(),
+            parse_mode="HTML",
         )
 
-        return
+        await call.answer()
 
-    if days <= 0 or max_uses <= 0:
 
-        await message.answer(
-            "❌ Значения должны быть больше 0."
+    # ========================================================
+    # STATS
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:stats")
+    async def admin_stats(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        try:
+            stats = get_stats()
+
+            if isinstance(stats, dict):
+
+                text = (
+                    "📊 <b>СТАТИСТИКА</b>\n\n"
+                    f"👥 Пользователей: "
+                    f"<b>{stats.get('users', 0)}</b>\n"
+                    f"🟢 Активных: "
+                    f"<b>{stats.get('active', 0)}</b>\n"
+                    f"💳 Платежей: "
+                    f"<b>{stats.get('payments', 0)}</b>\n"
+                    f"⭐ Stars: "
+                    f"<b>{stats.get('stars', 0)}</b>"
+                )
+
+            else:
+
+                text = (
+                    "📊 <b>СТАТИСТИКА</b>\n\n"
+                    f"<code>{stats}</code>"
+                )
+
+        except Exception as e:
+
+            text = (
+                "❌ Ошибка статистики:\n\n"
+                f"<code>{e}</code>"
+            )
+
+        await call.message.edit_text(
+            text,
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
         )
 
-        return
+        await call.answer()
 
-    try:
 
-        success = create_promo(
-            code.upper(),
-            days,
-            max_uses,
+    # ========================================================
+    # USERS
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:users")
+    async def admin_users(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        try:
+            users = get_all_users()
+
+            text = (
+                "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n"
+                f"Всего: <b>{len(users)}</b>\n\n"
+            )
+
+            for user in users[:30]:
+
+                user_id = value(
+                    user,
+                    "user_id",
+                    "—",
+                )
+
+                username = (
+                    value(
+                        user,
+                        "username",
+                        None,
+                    )
+                    or value(
+                        user,
+                        "first_name",
+                        None,
+                    )
+                    or "Без имени"
+                )
+
+                subscription = value(
+                    user,
+                    "subscription",
+                    "none",
+                )
+
+                until = value(
+                    user,
+                    "subscription_until",
+                    "",
+                )
+
+                text += (
+                    f"👤 <b>{username}</b>\n"
+                    f"🆔 <code>{user_id}</code>\n"
+                    f"📦 {subscription}\n"
+                    f"📅 {fmt_date(until)}\n\n"
+                )
+
+            if len(users) > 30:
+                text += (
+                    f"Показаны первые 30 "
+                    f"из {len(users)}."
+                )
+
+        except Exception as e:
+
+            text = (
+                "❌ Ошибка:\n"
+                f"<code>{e}</code>"
+            )
+
+        await call.message.edit_text(
+            text,
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
         )
 
-        if success:
+        await call.answer()
+
+
+    # ========================================================
+    # FIND USER
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:find")
+    async def admin_find(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        await call.message.answer(
+            "🔎 <b>Поиск пользователя</b>\n\n"
+            "Используйте:\n"
+            "<code>/user ID</code>\n\n"
+            "Например:\n"
+            "<code>/user 123456789</code>",
+            parse_mode="HTML",
+        )
+
+        await call.answer()
+
+
+    @dp.message(Command("user"))
+    async def admin_user(message: Message):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
 
             await message.answer(
-                "✅ <b>Промокод создан!</b>\n\n"
-                f"🎟 Код: "
-                f"<code>{safe(code.upper())}</code>\n"
-                f"➕ Дней: <b>{days}</b>\n"
-                f"🔢 Активаций: <b>{max_uses}</b>",
+                "Использование:\n"
+                "<code>/user ID</code>",
                 parse_mode="HTML",
             )
 
-        else:
+            return
+
+        try:
+            user_id = int(parts[1])
+        except ValueError:
 
             await message.answer(
-                "❌ Такой промокод уже существует."
+                "❌ ID должен быть числом."
             )
 
-    except Exception as e:
+            return
+
+        user = get_user(user_id)
+
+        if not user:
+
+            await message.answer(
+                "❌ Пользователь не найден."
+            )
+
+            return
+
+        devices = get_devices(user_id)
+
+        username = (
+            value(user, "username")
+            or "—"
+        )
+
+        first_name = (
+            value(user, "first_name")
+            or "—"
+        )
+
+        subscription = value(
+            user,
+            "subscription",
+            "none",
+        )
+
+        until = value(
+            user,
+            "subscription_until",
+            "",
+        )
+
+        device_limit = value(
+            user,
+            "device_limit",
+            1,
+        )
+
+        text = (
+            "👤 <b>ПОЛЬЗОВАТЕЛЬ</b>\n\n"
+            f"🆔 ID: <code>{user_id}</code>\n"
+            f"👤 Username: <b>{username}</b>\n"
+            f"📛 Имя: {first_name}\n\n"
+            f"📦 Подписка: <b>{subscription}</b>\n"
+            f"📅 До: <b>{fmt_date(until)}</b>\n"
+            f"📱 Устройства: "
+            f"<b>{len(devices)}</b>/"
+            f"<b>{device_limit}</b>"
+        )
+
+        kb = InlineKeyboardBuilder()
+
+        kb.button(
+            text="🎁 +30 дней",
+            callback_data=f"admin:give30:{user_id}",
+        )
+
+        kb.button(
+            text="🎁 +90 дней",
+            callback_data=f"admin:give90:{user_id}",
+        )
+
+        kb.button(
+            text="📱 Устройства",
+            callback_data=f"admin:userdevices:{user_id}",
+        )
+
+        kb.button(
+            text="⬅️ Админ-панель",
+            callback_data="admin:home",
+        )
+
+        kb.adjust(2, 1, 1)
 
         await message.answer(
-            f"❌ Ошибка:\n"
-            f"<code>{safe(e)}</code>",
+            text,
+            reply_markup=kb.as_markup(),
             parse_mode="HTML",
         )
 
 
-# ============================================================
-# DEVICES
-# ============================================================
+    # ========================================================
+    # GIVE
+    # ========================================================
 
-@dp.callback_query(F.data == "adm:devices")
-async def admin_devices(
-    call: CallbackQuery,
-):
+    @dp.callback_query(F.data == "admin:give")
+    async def admin_give(call: CallbackQuery):
 
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
+        if not is_admin(call.from_user.id):
+            return
 
-    users = get_all_users()
+        await call.message.answer(
+            "🎁 <b>Выдача подписки</b>\n\n"
+            "Используйте:\n"
+            "<code>/give ID DAYS</code>\n\n"
+            "Например:\n"
+            "<code>/give 123456789 30</code>",
+            parse_mode="HTML",
+        )
 
-    total_devices = 0
+        await call.answer()
 
-    users_with_devices = 0
 
-    for user in users:
+    @dp.message(Command("give"))
+    async def give_command(message: Message):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 3:
+
+            await message.answer(
+                "Использование:\n"
+                "<code>/give ID DAYS</code>",
+                parse_mode="HTML",
+            )
+
+            return
+
+        try:
+
+            user_id = int(parts[1])
+            days = int(parts[2])
+
+        except ValueError:
+
+            await message.answer(
+                "❌ ID и дни должны быть числами."
+            )
+
+            return
+
+        user = get_user(user_id)
+
+        if not user:
+
+            await message.answer(
+                "❌ Пользователь не найден."
+            )
+
+            return
+
+        try:
+
+            new_date = extend_subscription(
+                user_id,
+                days,
+                "admin",
+            )
+
+            await message.answer(
+                "✅ <b>Подписка выдана</b>\n\n"
+                f"🆔 <code>{user_id}</code>\n"
+                f"➕ Дней: <b>{days}</b>\n"
+                f"📅 До: "
+                f"<b>{fmt_date(new_date)}</b>",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+
+    @dp.callback_query(
+        F.data.startswith("admin:give30:")
+    )
+    async def give30(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        user_id = int(
+            call.data.split(":")[-1]
+        )
+
+        try:
+
+            new_date = extend_subscription(
+                user_id,
+                30,
+                "admin",
+            )
+
+            await call.answer(
+                "✅ Выдано 30 дней",
+                show_alert=True,
+            )
+
+            await call.message.answer(
+                f"🎁 Пользователю "
+                f"<code>{user_id}</code> "
+                f"выдано <b>30 дней</b>.\n"
+                f"📅 До: "
+                f"<b>{fmt_date(new_date)}</b>",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await call.answer(
+                f"Ошибка: {str(e)[:100]}",
+                show_alert=True,
+            )
+
+
+    @dp.callback_query(
+        F.data.startswith("admin:give90:")
+    )
+    async def give90(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        user_id = int(
+            call.data.split(":")[-1]
+        )
+
+        try:
+
+            new_date = extend_subscription(
+                user_id,
+                90,
+                "admin",
+            )
+
+            await call.answer(
+                "✅ Выдано 90 дней",
+                show_alert=True,
+            )
+
+            await call.message.answer(
+                f"🎁 Пользователю "
+                f"<code>{user_id}</code> "
+                f"выдано <b>90 дней</b>.\n"
+                f"📅 До: "
+                f"<b>{fmt_date(new_date)}</b>",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await call.answer(
+                f"Ошибка: {str(e)[:100]}",
+                show_alert=True,
+            )
+
+
+    # ========================================================
+    # DEVICES
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:devices")
+    async def admin_devices(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        try:
+
+            users = get_all_users()
+
+            total = 0
+
+            with_devices = 0
+
+            for user in users:
+
+                user_id = value(
+                    user,
+                    "user_id",
+                )
+
+                if not user_id:
+                    continue
+
+                try:
+
+                    items = get_devices(
+                        user_id
+                    )
+
+                    if items:
+                        with_devices += 1
+                        total += len(items)
+
+                except Exception:
+                    pass
+
+            text = (
+                "📱 <b>УСТРОЙСТВА</b>\n\n"
+                f"📱 Всего устройств: "
+                f"<b>{total}</b>\n"
+                f"👥 Пользователей с устройствами: "
+                f"<b>{with_devices}</b>\n\n"
+                "Для конкретного пользователя:\n"
+                "<code>/user ID</code>"
+            )
+
+        except Exception as e:
+
+            text = (
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>"
+            )
+
+        await call.message.edit_text(
+            text,
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+        await call.answer()
+
+
+    # ========================================================
+    # USER DEVICES
+    # ========================================================
+
+    @dp.callback_query(
+        F.data.startswith("admin:userdevices:")
+    )
+    async def user_devices(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        user_id = int(
+            call.data.split(":")[-1]
+        )
 
         try:
 
             items = get_devices(
-                user["user_id"]
+                user_id
             )
 
-            if items:
-
-                users_with_devices += 1
-                total_devices += len(items)
-
-        except Exception:
-            pass
-
-    text = (
-        "📱 <b>УСТРОЙСТВА</b>\n\n"
-        f"👥 Пользователей: "
-        f"<b>{len(users)}</b>\n"
-        f"📱 Всего устройств: "
-        f"<b>{total_devices}</b>\n"
-        f"👤 С устройствами: "
-        f"<b>{users_with_devices}</b>\n\n"
-        "Для просмотра устройств пользователя:\n"
-        "<code>/user USER_ID</code>"
-    )
-
-    await call.message.edit_text(
-        text,
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-# ============================================================
-# USER DEVICES
-# ============================================================
-
-@dp.callback_query(
-    F.data.startswith("adm:userdevices:")
-)
-async def admin_user_devices(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        user_id = int(
-            call.data.split(":")[-1]
-        )
-
-    except ValueError:
-
-        await call.answer(
-            "Неверный ID",
-            show_alert=True,
-        )
-
-        return
-
-    try:
-
-        items = get_devices(
-            user_id
-        )
-
-    except Exception as e:
-
-        await call.answer(
-            "Ошибка",
-            show_alert=True,
-        )
-
-        await call.message.answer(
-            f"❌ <code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    text = (
-        "📱 <b>УСТРОЙСТВА</b>\n\n"
-        f"🆔 Пользователь: "
-        f"<code>{user_id}</code>\n"
-        f"Количество: <b>{len(items)}</b>\n\n"
-    )
-
-    if not items:
-
-        text += "Устройств нет."
-
-    else:
-
-        for index, device in enumerate(
-            items,
-            start=1,
-        ):
-
-            text += (
-                f"{index}. "
-                f"<b>{safe(device.get('device_name') or 'Устройство')}</b>\n"
-                f"ID: <code>{safe(device.get('device_id'))}</code>\n\n"
+            text = (
+                "📱 <b>УСТРОЙСТВА</b>\n\n"
+                f"🆔 Пользователь: "
+                f"<code>{user_id}</code>\n"
+                f"Количество: "
+                f"<b>{len(items)}</b>\n\n"
             )
 
-    kb = InlineKeyboardBuilder()
+            if not items:
 
-    for device in items:
+                text += "Устройств нет."
 
-        device_id = device.get(
-            "device_id"
-        )
+            else:
 
-        kb.button(
-            text=(
-                f"❌ {str(device_id)[:12]}"
-            ),
-            callback_data=(
-                f"adm:deldevice:"
-                f"{user_id}:"
-                f"{device_id}"
-            ),
-        )
+                for i, device in enumerate(
+                    items,
+                    1,
+                ):
 
-    kb.button(
-        text="⬅️ Назад",
-        callback_data="adm:home",
+                    name = value(
+                        device,
+                        "device_name",
+                        "Устройство",
+                    )
+
+                    device_id = value(
+                        device,
+                        "device_id",
+                        "",
+                    )
+
+                    text += (
+                        f"{i}. <b>{name}</b>\n"
+                        f"ID: <code>{device_id}</code>\n\n"
+                    )
+
+            kb = InlineKeyboardBuilder()
+
+            for device in items:
+
+                device_id = value(
+                    device,
+                    "device_id",
+                    "",
+                )
+
+                kb.button(
+                    text=f"❌ {str(device_id)[:10]}",
+                    callback_data=(
+                        f"admin:deldevice:"
+                        f"{user_id}:"
+                        f"{device_id}"
+                    ),
+                )
+
+            kb.button(
+                text="⬅️ Назад",
+                callback_data="admin:home",
+            )
+
+            kb.adjust(1)
+
+            await call.message.answer(
+                text,
+                reply_markup=kb.as_markup(),
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await call.message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+        await call.answer()
+
+
+    # ========================================================
+    # DELETE DEVICE
+    # ========================================================
+
+    @dp.callback_query(
+        F.data.startswith("admin:deldevice:")
     )
-
-    kb.adjust(1)
-
-    await call.message.answer(
-        text,
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.callback_query(
-    F.data.startswith("adm:deldevice:")
-)
-async def admin_delete_device(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
+    async def admin_delete_device(
+        call: CallbackQuery,
     ):
-        return
 
-    parts = call.data.split(
-        ":",
-        3,
-    )
+        if not is_admin(call.from_user.id):
+            return
 
-    if len(parts) != 4:
+        parts = call.data.split(":", 3)
 
-        await call.answer(
-            "Ошибка",
-            show_alert=True,
-        )
-
-        return
-
-    try:
+        if len(parts) != 4:
+            await call.answer("Ошибка")
+            return
 
         user_id = int(parts[2])
-
-    except ValueError:
-
-        await call.answer(
-            "Неверный ID",
-            show_alert=True,
-        )
-
-        return
-
-    device_id = parts[3]
-
-    try:
-
-        delete_device(
-            user_id,
-            device_id,
-        )
-
-        await call.answer(
-            "Устройство удалено",
-            show_alert=True,
-        )
-
-    except Exception as e:
-
-        await call.answer(
-            f"Ошибка: {str(e)[:80]}",
-            show_alert=True,
-        )
-
-
-# ============================================================
-# PAYMENTS
-# ============================================================
-
-@dp.callback_query(F.data == "adm:payments")
-async def admin_payments(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    try:
-
-        stats = get_stats()
-
-        text = (
-            "💳 <b>ПЛАТЕЖИ</b>\n\n"
-            f"💳 Всего платежей: "
-            f"<b>{stats.get('payments', 0)}</b>\n"
-            f"⭐ Получено Stars: "
-            f"<b>{stats.get('stars', 0)}</b>\n\n"
-            "Подробные платежи доступны "
-            "через базу данных.\n\n"
-            "В следующей версии сюда можно "
-            "добавить полноценный журнал "
-            "платежей с фильтрами."
-        )
-
-    except Exception as e:
-
-        text = (
-            "❌ Ошибка:\n"
-            f"<code>{safe(e)}</code>"
-        )
-
-    await call.message.edit_text(
-        text,
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-# ============================================================
-# SYNCHRONIZATION
-# ============================================================
-
-@dp.callback_query(F.data == "adm:sync")
-async def admin_sync(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="🔄 Синхронизировать подписки",
-        callback_data="adm:sync_subs",
-    )
-
-    kb.button(
-        text="📡 Обновить серверы",
-        callback_data="adm:sync_servers",
-    )
-
-    kb.button(
-        text="⬅️ Назад",
-        callback_data="adm:home",
-    )
-
-    kb.adjust(1)
-
-    await call.message.edit_text(
-        "🔄 <b>СИНХРОНИЗАЦИЯ</b>\n\n"
-        "Выбери действие:",
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.callback_query(F.data == "adm:sync_subs")
-async def admin_sync_subscriptions(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.answer(
-        "Синхронизация запущена..."
-    )
-
-    try:
-
-        result = await asyncio.to_thread(
-            sync_all_active_users
-        )
-
-        await call.message.answer(
-            "✅ <b>Синхронизация завершена</b>\n\n"
-            f"🟢 Обновлено: "
-            f"<b>{result.get('updated', 0)}</b>\n"
-            f"🔴 Истекло: "
-            f"<b>{result.get('expired', 0)}</b>\n"
-            f"⚪ Пропущено: "
-            f"<b>{result.get('skipped', 0)}</b>\n"
-            f"❌ Ошибок: "
-            f"<b>{result.get('errors', 0)}</b>",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await call.message.answer(
-            "❌ <b>Ошибка синхронизации</b>\n\n"
-            f"<code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-@dp.callback_query(F.data == "adm:sync_servers")
-async def admin_sync_servers(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.answer(
-        "Обновление серверов..."
-    )
-
-    try:
-
-        result = await asyncio.to_thread(
-            sync_servers_update
-        )
-
-        await call.message.answer(
-            "✅ <b>Серверы обновлены</b>\n\n"
-            f"🟢 Обновлено: "
-            f"<b>{result.get('updated', 0)}</b>\n"
-            f"🔴 Истекло: "
-            f"<b>{result.get('expired', 0)}</b>\n"
-            f"⚪ Пропущено: "
-            f"<b>{result.get('skipped', 0)}</b>\n"
-            f"❌ Ошибок: "
-            f"<b>{result.get('errors', 0)}</b>",
-            parse_mode="HTML",
-        )
-
-    except Exception as e:
-
-        await call.message.answer(
-            "❌ <b>Ошибка</b>\n\n"
-            f"<code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-@dp.callback_query(F.data == "adm:settings")
-async def admin_settings(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    admin_list = ", ".join(
-        str(x)
-        for x in sorted(ADMIN_IDS)
-    )
-
-    text = (
-        "⚙️ <b>НАСТРОЙКИ</b>\n\n"
-        f"🧲 Сервис: "
-        f"<b>{safe(SERVICE_NAME)}</b>\n"
-        f"👑 Admin ID: "
-        f"<code>{safe(admin_list)}</code>\n\n"
-        "Секретные данные не отображаются.\n"
-        "Токены и ключи должны находиться "
-        "в .env."
-    )
-
-    await call.message.edit_text(
-        text,
-        reply_markup=back_admin_keyboard(),
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-# ============================================================
-# BROADCAST
-# ============================================================
-
-@dp.callback_query(F.data == "adm:broadcast")
-async def admin_broadcast(
-    call: CallbackQuery,
-):
-
-    if not is_admin(
-        call.from_user.id
-    ):
-        return
-
-    await call.message.answer(
-        "📢 <b>РАССЫЛКА</b>\n\n"
-        "Использование:\n"
-        "<code>/broadcast Текст сообщения</code>\n\n"
-        "Сообщение будет отправлено "
-        "всем пользователям из базы.",
-        parse_mode="HTML",
-    )
-
-    await call.answer()
-
-
-@dp.message(Command("broadcast"))
-async def admin_broadcast_command(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    text = message.text[
-        len("/broadcast"):
-    ].strip()
-
-    if not text:
-
-        await message.answer(
-            "❌ Напиши текст после команды.\n\n"
-            "<code>/broadcast Привет!</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    try:
-
-        users = get_all_users()
-
-    except Exception as e:
-
-        await message.answer(
-            f"❌ Ошибка базы:\n"
-            f"<code>{safe(e)}</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    sent = 0
-    failed = 0
-
-    status = await message.answer(
-        "📢 Рассылка запущена...\n"
-        "⏳ Подготавливаю пользователей."
-    )
-
-    for user in users:
-
-        user_id = user.get(
-            "user_id"
-        )
-
-        if not user_id:
-            continue
+        device_id = parts[3]
 
         try:
 
-            await message.bot.send_message(
-                chat_id=user_id,
-                text=text,
+            delete_device(
+                user_id,
+                device_id,
             )
 
-            sent += 1
+            await call.answer(
+                "✅ Устройство удалено",
+                show_alert=True,
+            )
 
-        except Exception:
+        except Exception as e:
 
-            failed += 1
+            await call.answer(
+                f"Ошибка: {str(e)[:100]}",
+                show_alert=True,
+            )
 
-        await asyncio.sleep(
-            0.05
+
+    # ========================================================
+    # SERVERS
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:nodes")
+    async def admin_nodes(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        try:
+
+            nodes = get_nodes()
+
+            text = (
+                "📡 <b>VPN СЕРВЕРЫ</b>\n\n"
+            )
+
+            if not nodes:
+
+                text += "Серверов нет."
+
+            else:
+
+                for node in nodes:
+
+                    node_id = value(
+                        node,
+                        "id",
+                        "—",
+                    )
+
+                    name = value(
+                        node,
+                        "name",
+                        "Без названия",
+                    )
+
+                    text += (
+                        f"🖥 <b>#{node_id} "
+                        f"{name}</b>\n"
+                        f"<code>"
+                        f"{value(node, 'vless_link', '')}"
+                        f"</code>\n\n"
+                    )
+
+            text += (
+                "\n➕ Добавить:\n"
+                "<code>/addnode Название|VLESS</code>\n\n"
+                "🗑 Удалить:\n"
+                "<code>/delnode ID</code>"
+            )
+
+        except Exception as e:
+
+            text = (
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>"
+            )
+
+        await call.message.edit_text(
+            text,
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
         )
 
-    await status.edit_text(
-        "📢 <b>Рассылка завершена</b>\n\n"
-        f"✅ Отправлено: <b>{sent}</b>\n"
-        f"❌ Ошибок: <b>{failed}</b>",
-        parse_mode="HTML",
-    )
+        await call.answer()
 
 
-# ============================================================
-# COMMAND: ADMIN HELP
-# ============================================================
-
-@dp.message(Command("adminhelp"))
-async def admin_help(
-    message: Message,
-):
-
-    if not is_admin(
-        message.from_user.id
+    @dp.message(Command("addnode"))
+    async def admin_addnode(
+        message: Message,
     ):
-        return
 
-    await message.answer(
-        "👑 <b>КОМАНДЫ АДМИНИСТРАТОРА</b>\n\n"
-        "🏠 <code>/admin</code> — панель\n"
-        "👤 <code>/user ID</code> — пользователь\n"
-        "🎁 <code>/give ID DAYS</code> — выдать дни\n"
-        "🚫 <code>/block ID</code> — блокировка\n"
-        "🔓 <code>/unblock ID</code> — разблокировка\n"
-        "📡 <code>/addnode NAME|VLESS</code> — сервер\n"
-        "🗑 <code>/delnode ID</code> — удалить сервер\n"
-        "🎟 <code>/promo CODE DAYS USES</code> — промокод\n"
-        "📢 <code>/broadcast TEXT</code> — рассылка\n\n"
-        "Все остальные функции находятся "
-        "в кнопочной админ-панели.",
-        parse_mode="HTML",
-    )
+        if not is_admin(message.from_user.id):
+            return
+
+        data = message.text[
+            len("/addnode"):
+        ].strip()
+
+        if "|" not in data:
+
+            await message.answer(
+                "Формат:\n"
+                "<code>/addnode Название|VLESS</code>",
+                parse_mode="HTML",
+            )
+
+            return
+
+        name, link = data.split(
+            "|",
+            1,
+        )
+
+        try:
+
+            node_id = add_node(
+                name.strip(),
+                link.strip(),
+            )
+
+            await message.answer(
+                "✅ <b>Сервер добавлен</b>\n\n"
+                f"🆔 ID: <code>{node_id}</code>\n"
+                f"📡 {name.strip()}",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+
+    @dp.message(Command("delnode"))
+    async def admin_delnode(
+        message: Message,
+    ):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        data = message.text[
+            len("/delnode"):
+        ].strip()
+
+        try:
+
+            node_id = int(data)
+
+            delete_node(
+                node_id
+            )
+
+            await message.answer(
+                f"✅ Сервер "
+                f"<code>{node_id}</code> удалён.",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+
+    # ========================================================
+    # PROMO
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:promo")
+    async def admin_promo(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        await call.message.edit_text(
+            "🎟 <b>ПРОМОКОДЫ</b>\n\n"
+            "Создать:\n"
+            "<code>/promo КОД ДНИ</code>\n\n"
+            "Пример:\n"
+            "<code>/promo MAGNIT100 30</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+        await call.answer()
+
+
+    @dp.message(Command("promo"))
+    async def admin_promo_command(
+        message: Message,
+    ):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 3:
+
+            await message.answer(
+                "Формат:\n"
+                "<code>/promo КОД ДНИ</code>",
+                parse_mode="HTML",
+            )
+
+            return
+
+        code = parts[1].upper()
+
+        try:
+            days = int(parts[2])
+        except ValueError:
+
+            await message.answer(
+                "❌ Дни должны быть числом."
+            )
+
+            return
+
+        try:
+
+            result = create_promo(
+                code,
+                days,
+            )
+
+            await message.answer(
+                "🎟 <b>Промокод создан</b>\n\n"
+                f"Код: <code>{code}</code>\n"
+                f"Дней: <b>{days}</b>\n\n"
+                f"Результат: <code>{result}</code>",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+
+    # ========================================================
+    # BLOCK
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:block")
+    async def admin_block_help(
+        call: CallbackQuery,
+    ):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        await call.message.answer(
+            "🚫 <b>Блокировка</b>\n\n"
+            "<code>/block ID</code> — заблокировать\n"
+            "<code>/unblock ID</code> — разблокировать",
+            parse_mode="HTML",
+        )
+
+        await call.answer()
+
+
+    @dp.message(Command("block"))
+    async def admin_block_command(
+        message: Message,
+    ):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+
+            await message.answer(
+                "<code>/block ID</code>",
+                parse_mode="HTML",
+            )
+
+            return
+
+        try:
+
+            user_id = int(parts[1])
+
+            block_user(
+                user_id,
+                True,
+            )
+
+            await message.answer(
+                f"🚫 Пользователь "
+                f"<code>{user_id}</code> "
+                f"заблокирован.",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+
+    @dp.message(Command("unblock"))
+    async def admin_unblock_command(
+        message: Message,
+    ):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+
+            await message.answer(
+                "<code>/unblock ID</code>",
+                parse_mode="HTML",
+            )
+
+            return
+
+        try:
+
+            user_id = int(parts[1])
+
+            block_user(
+                user_id,
+                False,
+            )
+
+            await message.answer(
+                f"🔓 Пользователь "
+                f"<code>{user_id}</code> "
+                f"разблокирован.",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+
+    # ========================================================
+    # BROADCAST
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:broadcast")
+    async def admin_broadcast(
+        call: CallbackQuery,
+    ):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        await call.message.answer(
+            "📢 <b>РАССЫЛКА</b>\n\n"
+            "Используйте:\n"
+            "<code>/broadcast Текст</code>",
+            parse_mode="HTML",
+        )
+
+        await call.answer()
+
+
+    @dp.message(Command("broadcast"))
+    async def broadcast_command(
+        message: Message,
+    ):
+
+        if not is_admin(message.from_user.id):
+            return
+
+        text = message.text[
+            len("/broadcast"):
+        ].strip()
+
+        if not text:
+
+            await message.answer(
+                "❌ Укажите текст."
+            )
+
+            return
+
+        users = get_all_users()
+
+        sent = 0
+        failed = 0
+
+        status = await message.answer(
+            "📢 Рассылка запущена..."
+        )
+
+        for user in users:
+
+            user_id = value(
+                user,
+                "user_id",
+            )
+
+            if not user_id:
+                continue
+
+            try:
+
+                await message.bot.send_message(
+                    user_id,
+                    text,
+                )
+
+                sent += 1
+
+            except Exception:
+
+                failed += 1
+
+            await asyncio.sleep(0.05)
+
+        await status.edit_text(
+            "📢 <b>Рассылка завершена</b>\n\n"
+            f"✅ Отправлено: <b>{sent}</b>\n"
+            f"❌ Ошибок: <b>{failed}</b>",
+            parse_mode="HTML",
+        )
+
+
+    # ========================================================
+    # SYNC
+    # ========================================================
+
+    @dp.callback_query(F.data == "admin:sync")
+    async def admin_sync(call: CallbackQuery):
+
+        if not is_admin(call.from_user.id):
+            return
+
+        await call.answer(
+            "Синхронизация запущена..."
+        )
+
+        try:
+
+            result = await asyncio.to_thread(
+                sync_all_active_users
+            )
+
+            await call.message.answer(
+                "✅ <b>Синхронизация завершена</b>\n\n"
+                f"🟢 Обновлено: "
+                f"<b>{result.get('updated', 0)}</b>\n"
+                f"🔴 Истекло: "
+                f"<b>{result.get('expired', 0)}</b>\n"
+                f"⚪ Неактивно: "
+                f"<b>{result.get('skipped', 0)}</b>\n"
+                f"❌ Ошибок: "
+                f"<b>{result.get('errors', 0)}</b>",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+
+            await call.message.answer(
+                f"❌ Ошибка:\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML",
+            )
