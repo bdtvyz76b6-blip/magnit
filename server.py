@@ -1,18 +1,42 @@
-import base64
-import json
 from datetime import datetime
-from urllib.parse import unquote
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import (
+    FastAPI,
+    HTTPException,
+)
+
 from fastapi.responses import Response
 
-from config import API_SECRET, SERVICE_NAME
 from database import (
     get_user_by_token,
     get_nodes,
     get_devices,
+    add_device,
+    parse_datetime,
+    now_utc,
 )
 
+import os
+
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+SERVICE_NAME = os.getenv(
+    "SERVICE_NAME",
+    "Магнит VPN",
+)
+
+API_SECRET = os.getenv(
+    "API_SECRET",
+    "",
+)
+
+
+# ============================================================
+# APP
+# ============================================================
 
 app = FastAPI(
     title="Магнит VPN API"
@@ -20,109 +44,164 @@ app = FastAPI(
 
 
 # ============================================================
-# CHECK SUBSCRIPTION
+# USER CHECK
 # ============================================================
 
 def check_user(token):
-    user = get_user_by_token(token)
+
+    user = get_user_by_token(
+        token
+    )
 
     if not user:
+
         raise HTTPException(
             status_code=404,
-            detail="Subscription not found"
+            detail="Subscription not found",
         )
 
-    if user["blocked"]:
+
+    if int(
+        user.get("blocked", 0)
+        or 0
+    ):
+
         raise HTTPException(
             status_code=403,
-            detail="Subscription blocked"
+            detail="Subscription blocked",
         )
 
-    if not user["subscription_until"]:
+
+    if not user.get(
+        "subscription_until"
+    ):
+
         raise HTTPException(
             status_code=403,
-            detail="Subscription inactive"
+            detail="Subscription inactive",
         )
 
-    try:
-        expire = datetime.fromisoformat(
-            user["subscription_until"]
+
+    expire = parse_datetime(
+        user.get(
+            "subscription_until"
         )
-    except Exception:
+    )
+
+
+    if not expire:
+
         raise HTTPException(
             status_code=500,
-            detail="Invalid expiration date"
+            detail="Invalid expiration date",
         )
 
-    if expire < datetime.utcnow():
+
+    if expire <= now_utc():
+
         raise HTTPException(
             status_code=403,
-            detail="Subscription expired"
+            detail="Subscription expired",
         )
 
+
     return user
-
-
-# ============================================================
-# VLESS → BASE64
-# ============================================================
-
-def encode_base64(text):
-    return base64.b64encode(
-        text.encode()
-    ).decode()
 
 
 # ============================================================
 # SUBSCRIPTION
 # ============================================================
 
-@app.get("/sub/{token}")
-async def subscription(token: str):
+@app.get(
+    "/sub/{token}"
+)
+async def subscription(
+    token: str,
+):
 
-    user = check_user(token)
-    nodes = get_nodes()
+    user = check_user(
+        token
+    )
+
+
+    nodes = get_nodes(
+        active_only=True
+    )
+
 
     links = []
 
     for node in nodes:
-        link = node["vless_link"].strip()
+
+        link = (
+            node.get(
+                "vless_link",
+                "",
+            )
+            or ""
+        ).strip()
 
         if not link:
             continue
 
-        # Можно оставить ссылку как есть.
-        # Сервер просто отдаёт её Happ.
-        links.append(link)
+        if not link.startswith(
+            "vless://"
+        ):
+            continue
 
-    # Если узлов нет — отдаём пустую подписку.
-    content = "\n".join(links)
+        links.append(
+            link
+        )
 
-    encoded = encode_base64(content)
+
+    content = "\n".join(
+        links
+    )
+
+
+    encoded = __import__(
+        "base64"
+    ).b64encode(
+        content.encode("utf-8")
+    ).decode("ascii")
+
 
     expire = int(
-        datetime.fromisoformat(
-            user["subscription_until"]
+        parse_datetime(
+            user[
+                "subscription_until"
+            ]
         ).timestamp()
     )
 
+
     headers = {
-        "subscription-userinfo": (
-            f"upload=0;"
-            f"download=0;"
+
+        "subscription-userinfo":
+            "upload=0;"
+            "download=0;"
             f"total=0;"
-            f"expire={expire}"
-        ),
-        "profile-title": SERVICE_NAME,
-        "profile-update-interval": "6",
+            f"expire={expire}",
+
+        "profile-title":
+            SERVICE_NAME,
+
+        "profile-update-interval":
+            "6",
+
         "content-disposition":
-            'attachment; filename="magnit.txt"',
+            'attachment; '
+            'filename="magnit.txt"',
     }
+
 
     return Response(
         content=encoded,
-        media_type="text/plain; charset=utf-8",
-        headers=headers
+        media_type=(
+            "text/plain; "
+            "charset=utf-8"
+        ),
+        headers=headers,
     )
 
 
@@ -130,84 +209,172 @@ async def subscription(token: str):
 # JSON SUBSCRIPTION
 # ============================================================
 
-@app.get("/sub/{token}/json")
-async def subscription_json(token: str):
+@app.get(
+    "/sub/{token}/json"
+)
+async def subscription_json(
+    token: str,
+):
 
-    user = check_user(token)
-    nodes = get_nodes()
+    user = check_user(
+        token
+    )
+
+
+    nodes = get_nodes(
+        active_only=True
+    )
+
 
     servers = []
 
+
     for node in nodes:
+
+        url = (
+            node.get(
+                "vless_link",
+                "",
+            )
+            or ""
+        ).strip()
+
+
+        if not url:
+            continue
+
+
         servers.append({
-            "name": node["name"],
-            "url": node["vless_link"],
+            "name": node.get(
+                "name",
+                "",
+            ),
+            "url": url,
         })
 
+
     expire = int(
-        datetime.fromisoformat(
-            user["subscription_until"]
+        parse_datetime(
+            user[
+                "subscription_until"
+            ]
         ).timestamp()
     )
 
+
     data = {
-        "name": SERVICE_NAME,
-        "expire": expire,
+
+        "name":
+            SERVICE_NAME,
+
+        "expire":
+            expire,
+
         "user": {
-            "id": user["user_id"],
-            "subscription": user["subscription"],
-            "device_limit": user["device_limit"],
+
+            "id":
+                user["user_id"],
+
+            "subscription":
+                user.get(
+                    "subscription",
+                    "none",
+                ),
+
+            "device_limit":
+                int(
+                    user.get(
+                        "device_limit",
+                        3,
+                    )
+                    or 3
+                ),
         },
-        "servers": servers,
+
+        "servers":
+            servers,
     }
 
+
     return data
+
+
+# ============================================================
+# DEVICE REGISTER
+# ============================================================
+
+@app.post(
+    "/api/device/{token}"
+)
+async def register_device(
+    token: str,
+    device_id: str,
+    device_name: str = "",
+):
+
+    user = check_user(
+        token
+    )
+
+
+    success = add_device(
+        user["user_id"],
+        device_id,
+        device_name,
+    )
+
+
+    if not success:
+
+        return {
+            "success": False,
+            "error":
+                "device_limit",
+        }
+
+
+    return {
+        "success": True,
+    }
 
 
 # ============================================================
 # DEVICES
 # ============================================================
 
-@app.post("/api/device/{token}")
-async def register_device(
+@app.get(
+    "/api/devices/{token}"
+)
+async def devices(
     token: str,
-    device_id: str,
-    device_name: str = "",
 ):
-    user = check_user(token)
 
-    from database import add_device
-
-    success = add_device(
-        user["user_id"],
-        device_id,
-        device_name
+    user = check_user(
+        token
     )
 
-    if not success:
-        return {
-            "success": False,
-            "error": "device_limit"
-        }
-
-    return {
-        "success": True
-    }
-
-
-@app.get("/api/devices/{token}")
-async def devices(token: str):
-
-    user = check_user(token)
 
     items = get_devices(
         user["user_id"]
     )
 
+
     return {
-        "success": True,
-        "limit": user["device_limit"],
-        "devices": items
+
+        "success":
+            True,
+
+        "limit":
+            int(
+                user.get(
+                    "device_limit",
+                    3,
+                )
+                or 3
+            ),
+
+        "devices":
+            items,
     }
 
 
@@ -217,16 +384,22 @@ async def devices(token: str):
 
 @app.get("/")
 async def root():
+
     return {
-        "service": SERVICE_NAME,
-        "status": "online"
+        "service":
+            SERVICE_NAME,
+
+        "status":
+            "online",
     }
 
 
 @app.get("/health")
 async def health():
+
     return {
-        "status": "ok"
+        "status":
+            "ok",
     }
 
 
@@ -235,11 +408,17 @@ async def health():
 # ============================================================
 
 if __name__ == "__main__":
+
     import uvicorn
 
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
-        port=8080,
-        reload=False
+        port=int(
+            os.getenv(
+                "PORT",
+                "8080",
+            )
+        ),
+        reload=False,
     )
