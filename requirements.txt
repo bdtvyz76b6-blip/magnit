@@ -1,5 +1,5 @@
-aiogram
-fastapi
-uvicorn
-python-dotenv
-requests
+aiogram>=3.22,<4
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-dotenv>=1.0,<2
+requests>=2.32,<3
