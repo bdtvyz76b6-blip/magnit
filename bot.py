@@ -29,20 +29,37 @@ from database import (
 )
 
 # ============================================================
-# BOT
+# АДМИНКА
+# ============================================================
+
+from admin import register_admin_handlers
+
+
+# ============================================================
+# ПРОВЕРКА КОНФИГА
 # ============================================================
 
 if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN is not configured"
-    )
+    raise RuntimeError("BOT_TOKEN is not configured")
+
+
+# ============================================================
+# BOT / DISPATCHER
+# ============================================================
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 
 # ============================================================
-# KEYBOARDS
+# РЕГИСТРАЦИЯ АДМИН-ОБРАБОТЧИКОВ
+# ============================================================
+
+register_admin_handlers(dp)
+
+
+# ============================================================
+# ГЛАВНАЯ КЛАВИАТУРА
 # ============================================================
 
 def main_keyboard():
@@ -73,16 +90,16 @@ def main_keyboard():
     return kb.as_markup()
 
 
+# ============================================================
+# ТАРИФЫ
+# ============================================================
+
 def tariff_keyboard():
     kb = InlineKeyboardBuilder()
 
     for key, tariff in TARIFFS.items():
-
         kb.button(
-            text=(
-                f"{tariff['name']} — "
-                f"⭐{tariff['stars']}"
-            ),
+            text=f"{tariff['name']} — ⭐{tariff['stars']}",
             callback_data=f"tariff:{key}",
         )
 
@@ -97,15 +114,17 @@ def tariff_keyboard():
 
 
 # ============================================================
-# HELPERS
+# ССЫЛКА ПОДПИСКИ
 # ============================================================
 
 def subscription_link(user):
     """
-    Получает постоянную ссылку пользователя.
+    Возвращает ссылку подписки пользователя.
 
-    Если она уже есть в БД — используем её.
-    Иначе строим новую.
+    Приоритет:
+    1. subscription_link из БД
+    2. token из БД
+    3. fallback через user_id
     """
 
     if user.get("subscription_link"):
@@ -114,34 +133,23 @@ def subscription_link(user):
     token = user.get("token")
 
     if token:
-        return (
-            f"{PUBLIC_URL}/sub/"
-            f"{token}"
-        )
+        return f"{PUBLIC_URL}/sub/{token}"
 
-    return (
-        f"{PUBLIC_URL}/sub/"
-        f"{user['user_id']}"
-    )
+    return f"{PUBLIC_URL}/sub/{user['user_id']}"
 
+
+# ============================================================
+# ФОРМАТ ДАТЫ
+# ============================================================
 
 def format_date(value):
-
     if not value:
         return "—"
 
     try:
-
-        dt = datetime.fromisoformat(
-            str(value)
-        )
-
-        return dt.strftime(
-            "%d.%m.%Y %H:%M"
-        )
-
+        dt = datetime.fromisoformat(str(value))
+        return dt.strftime("%d.%m.%Y %H:%M")
     except Exception:
-
         return str(value)
 
 
@@ -169,75 +177,86 @@ async def start(message: Message):
 
 
 # ============================================================
-# CABINET
+# ЛИЧНЫЙ КАБИНЕТ
 # ============================================================
 
 @dp.callback_query(F.data == "cabinet")
 async def cabinet(call: CallbackQuery):
 
-    user = get_user(
-        call.from_user.id
-    )
+    user = get_user(call.from_user.id)
 
     if not user:
-
         user = create_user(
             call.from_user.id,
             call.from_user.username,
             call.from_user.first_name,
         )
 
-    devices = get_devices(
-        call.from_user.id
-    )
+    devices = get_devices(call.from_user.id)
 
     link = subscription_link(user)
 
-    subscription_until = (
-        user.get("subscription_until")
+    subscription_until = user.get(
+        "subscription_until"
     )
+
+    # --------------------------------------------------------
+    # СТАТУС
+    # --------------------------------------------------------
 
     if subscription_until:
 
         try:
-
             expire_dt = datetime.fromisoformat(
                 str(subscription_until)
             )
 
             if expire_dt > datetime.utcnow():
-
                 status = "🟢 Активна"
-
             else:
-
                 status = "🔴 Истекла"
 
         except Exception:
-
             status = "⚪ Неизвестно"
 
     else:
-
         status = "⚪ Не активна"
+
+    # --------------------------------------------------------
+    # ЛИМИТ УСТРОЙСТВ
+    # --------------------------------------------------------
 
     device_limit = user.get(
         "device_limit",
         1,
     )
 
+    # --------------------------------------------------------
+    # ТЕКСТ
+    # --------------------------------------------------------
+
     text = (
         "👤 <b>Личный кабинет</b>\n\n"
+
         f"🆔 ID: "
         f"<code>{user['user_id']}</code>\n"
+
         f"📡 Статус: {status}\n"
+
         f"📅 До: "
         f"<b>{format_date(subscription_until)}</b>\n"
+
         f"📱 Устройства: "
         f"{len(devices)}/{device_limit}\n\n"
+
         "🔗 <b>Ссылка подписки:</b>\n"
+
         f"<code>{link}</code>"
     )
+
+    # --------------------------------------------------------
+    # КНОПКИ
+    # --------------------------------------------------------
 
     kb = InlineKeyboardBuilder()
 
@@ -273,23 +292,19 @@ async def cabinet(call: CallbackQuery):
 
 
 # ============================================================
-# COPY LINK
+# КОПИРОВАНИЕ ССЫЛКИ
 # ============================================================
 
 @dp.callback_query(F.data == "copy_link")
 async def copy_link(call: CallbackQuery):
 
-    user = get_user(
-        call.from_user.id
-    )
+    user = get_user(call.from_user.id)
 
     if not user:
-
         await call.answer(
             "Сначала нажми /start",
             show_alert=True,
         )
-
         return
 
     link = subscription_link(user)
@@ -300,28 +315,24 @@ async def copy_link(call: CallbackQuery):
     )
 
     await call.answer(
-        "Ссылка отправлена",
+        "Ссылка отправлена"
     )
 
 
 # ============================================================
-# DEVICES
+# УСТРОЙСТВА
 # ============================================================
 
 @dp.callback_query(F.data == "devices")
 async def devices(call: CallbackQuery):
 
-    user = get_user(
-        call.from_user.id
-    )
+    user = get_user(call.from_user.id)
 
     if not user:
-
         await call.answer(
             "Сначала нажми /start",
             show_alert=True,
         )
-
         return
 
     items = get_devices(
@@ -335,8 +346,7 @@ async def devices(call: CallbackQuery):
 
     text = (
         "📱 <b>Мои устройства</b>\n\n"
-        f"Лимит: "
-        f"{len(items)}/{device_limit}\n\n"
+        f"Лимит: {len(items)}/{device_limit}\n\n"
     )
 
     if not items:
@@ -362,9 +372,12 @@ async def devices(call: CallbackQuery):
 
             text += (
                 f"{i}. {device_name}\n"
-                f"   ID: "
-                f"<code>{device_id}</code>\n"
+                f"   ID: <code>{device_id}</code>\n"
             )
+
+    # --------------------------------------------------------
+    # КНОПКИ УСТРОЙСТВ
+    # --------------------------------------------------------
 
     kb = InlineKeyboardBuilder()
 
@@ -383,9 +396,7 @@ async def devices(call: CallbackQuery):
 
         kb.button(
             text=f"❌ {device_name}",
-            callback_data=(
-                f"deldevice:{device_id}"
-            ),
+            callback_data=f"deldevice:{device_id}",
         )
 
     kb.button(
@@ -405,15 +416,13 @@ async def devices(call: CallbackQuery):
 
 
 # ============================================================
-# DELETE DEVICE
+# УДАЛЕНИЕ УСТРОЙСТВА
 # ============================================================
 
 @dp.callback_query(
     F.data.startswith("deldevice:")
 )
-async def remove_device(
-    call: CallbackQuery
-):
+async def remove_device(call: CallbackQuery):
 
     device_id = call.data.split(
         ":",
@@ -426,14 +435,14 @@ async def remove_device(
     )
 
     await call.answer(
-        "Устройство удалено",
+        "Устройство удалено"
     )
 
     await devices(call)
 
 
 # ============================================================
-# BUY
+# ПОКУПКА
 # ============================================================
 
 @dp.callback_query(F.data == "buy")
@@ -449,14 +458,14 @@ async def buy(call: CallbackQuery):
 
 
 # ============================================================
-# SELECT TARIFF
+# ВЫБОР ТАРИФА
 # ============================================================
 
 @dp.callback_query(
     F.data.startswith("tariff:")
 )
 async def select_tariff(
-    call: CallbackQuery
+    call: CallbackQuery,
 ):
 
     key = call.data.split(
@@ -464,9 +473,7 @@ async def select_tariff(
         1,
     )[1]
 
-    tariff = TARIFFS.get(
-        key
-    )
+    tariff = TARIFFS.get(key)
 
     if not tariff:
 
@@ -476,6 +483,10 @@ async def select_tariff(
         )
 
         return
+
+    # --------------------------------------------------------
+    # СОЗДАЁМ ПЛАТЁЖ
+    # --------------------------------------------------------
 
     payment_id = create_payment(
         call.from_user.id,
@@ -491,18 +502,27 @@ async def select_tariff(
         )
     ]
 
+    # --------------------------------------------------------
+    # TELEGRAM STARS
+    # --------------------------------------------------------
+
     await bot.send_invoice(
         chat_id=call.from_user.id,
+
         title=(
             f"{SERVICE_NAME} — "
             f"{tariff['name']}"
         ),
+
         description=(
-            f"VPN подписка на "
-            f"{tariff['days']} дней"
+            f"VPN подписка "
+            f"на {tariff['days']} дней"
         ),
+
         payload=str(payment_id),
+
         currency="XTR",
+
         prices=prices,
     )
 
@@ -510,7 +530,7 @@ async def select_tariff(
 
 
 # ============================================================
-# PRE CHECKOUT
+# PRE-CHECKOUT
 # ============================================================
 
 @dp.pre_checkout_query()
@@ -522,12 +542,12 @@ async def pre_checkout(query):
 
 
 # ============================================================
-# SUCCESSFUL PAYMENT
+# УСПЕШНАЯ ОПЛАТА
 # ============================================================
 
 @dp.message(F.successful_payment)
 async def successful_payment(
-    message: Message
+    message: Message,
 ):
 
     payment = message.successful_payment
@@ -535,6 +555,10 @@ async def successful_payment(
     payment_id = int(
         payment.invoice_payload
     )
+
+    # --------------------------------------------------------
+    # ЗАВЕРШАЕМ ПЛАТЁЖ
+    # --------------------------------------------------------
 
     result = complete_payment(
         payment_id,
@@ -549,6 +573,10 @@ async def successful_payment(
 
         return
 
+    # --------------------------------------------------------
+    # ТАРИФ
+    # --------------------------------------------------------
+
     tariff_key = result["tariff"]
 
     tariff = TARIFFS.get(
@@ -561,11 +589,19 @@ async def successful_payment(
         else "active"
     )
 
+    # --------------------------------------------------------
+    # ПРОДЛЕВАЕМ ПОДПИСКУ
+    # --------------------------------------------------------
+
     new_date = extend_subscription(
         message.from_user.id,
         result["days"],
         tariff_name,
     )
+
+    # --------------------------------------------------------
+    # ЛИМИТ УСТРОЙСТВ
+    # --------------------------------------------------------
 
     if tariff:
 
@@ -574,26 +610,53 @@ async def successful_payment(
             tariff["device_limit"],
         )
 
+    # --------------------------------------------------------
+    # ПОЛЬЗОВАТЕЛЬ
+    # --------------------------------------------------------
+
     user = get_user(
         message.from_user.id
     )
 
+    link = subscription_link(
+        user
+    )
+
+    # --------------------------------------------------------
+    # ОТВЕТ
+    # --------------------------------------------------------
+
+    if tariff:
+
+        tariff_display = tariff["name"]
+
+    else:
+
+        tariff_display = "Активная подписка"
+
     await message.answer(
         f"✅ <b>Оплата прошла!</b>\n\n"
+
         f"🧲 {SERVICE_NAME}\n"
+
         f"📦 Тариф: "
-        f"<b>{tariff['name']}</b>\n"
+        f"<b>{tariff_display}</b>\n"
+
         f"📅 Действует до: "
         f"<b>{format_date(new_date.isoformat())}</b>\n\n"
-        "🔗 Ссылка:\n"
-        f"<code>{subscription_link(user)}</code>",
+
+        "🔗 <b>Ссылка:</b>\n"
+
+        f"<code>{link}</code>",
+
         parse_mode="HTML",
+
         reply_markup=main_keyboard(),
     )
 
 
 # ============================================================
-# TRIAL
+# ПРОБНЫЙ ПЕРИОД
 # ============================================================
 
 @dp.callback_query(F.data == "trial")
@@ -606,12 +669,15 @@ async def trial(call: CallbackQuery):
     if not success:
 
         await call.answer(
-            "❌ Вы уже использовали "
-            "пробный период.",
+            "❌ Вы уже использовали пробный период.",
             show_alert=True,
         )
 
         return
+
+    # --------------------------------------------------------
+    # АКТИВИРУЕМ
+    # --------------------------------------------------------
 
     date = extend_subscription(
         call.from_user.id,
@@ -623,15 +689,29 @@ async def trial(call: CallbackQuery):
         call.from_user.id
     )
 
+    link = subscription_link(
+        user
+    )
+
+    # --------------------------------------------------------
+    # ОТВЕТ
+    # --------------------------------------------------------
+
     await call.message.edit_text(
-        "🎁 <b>Пробный период "
-        "активирован!</b>\n\n"
-        f"⏳ Срок: {TRIAL_DAYS} дня\n"
+        "🎁 <b>Пробный период активирован!</b>\n\n"
+
+        f"⏳ Срок: "
+        f"{TRIAL_DAYS} дня\n"
+
         f"📅 До: "
         f"<b>{format_date(date.isoformat())}</b>\n\n"
-        "🔗 Ваша ссылка:\n"
-        f"<code>{subscription_link(user)}</code>",
+
+        "🔗 <b>Ваша ссылка:</b>\n"
+
+        f"<code>{link}</code>",
+
         reply_markup=main_keyboard(),
+
         parse_mode="HTML",
     )
 
@@ -639,18 +719,20 @@ async def trial(call: CallbackQuery):
 
 
 # ============================================================
-# PROMO
+# ПРОМОКОД
 # ============================================================
 
 @dp.callback_query(F.data == "promo")
 async def promo_request(
-    call: CallbackQuery
+    call: CallbackQuery,
 ):
 
     await call.message.answer(
-        "🎟 Введите промокод сообщением.\n\n"
+        "🎟 <b>Введите промокод сообщением.</b>\n\n"
+
         "Например:\n"
         "<code>PROMO: MAGNIT100</code>",
+
         parse_mode="HTML",
     )
 
@@ -658,18 +740,16 @@ async def promo_request(
 
 
 # ============================================================
-# PROMO MESSAGE
+# ОБРАБОТКА ПРОМОКОДА
 # ============================================================
 
 @dp.message(
     lambda message:
     message.text
-    and message.text.upper().startswith(
-        "PROMO:"
-    )
+    and message.text.upper().startswith("PROMO:")
 )
 async def promo_message(
-    message: Message
+    message: Message,
 ):
 
     code = message.text.split(
@@ -689,6 +769,10 @@ async def promo_message(
 
         return
 
+    # --------------------------------------------------------
+    # АКТИВИРУЕМ ДНИ
+    # --------------------------------------------------------
+
     date = extend_subscription(
         message.from_user.id,
         promo["days"],
@@ -699,20 +783,34 @@ async def promo_message(
         message.from_user.id
     )
 
+    link = subscription_link(
+        user
+    )
+
+    # --------------------------------------------------------
+    # ОТВЕТ
+    # --------------------------------------------------------
+
     await message.answer(
         "🎉 <b>Промокод активирован!</b>\n\n"
+
         f"➕ {promo['days']} дней\n"
+
         f"📅 До: "
         f"<b>{format_date(date.isoformat())}</b>\n\n"
-        "🔗 Ваша ссылка:\n"
-        f"<code>{subscription_link(user)}</code>",
+
+        "🔗 <b>Ваша ссылка:</b>\n"
+
+        f"<code>{link}</code>",
+
         parse_mode="HTML",
+
         reply_markup=main_keyboard(),
     )
 
 
 # ============================================================
-# BACK
+# НАЗАД
 # ============================================================
 
 @dp.callback_query(F.data == "back")
@@ -721,7 +819,9 @@ async def back(call: CallbackQuery):
     await call.message.edit_text(
         f"🧲 <b>{SERVICE_NAME}</b>\n\n"
         "Главное меню:",
+
         reply_markup=main_keyboard(),
+
         parse_mode="HTML",
     )
 
@@ -729,7 +829,7 @@ async def back(call: CallbackQuery):
 
 
 # ============================================================
-# АВТОМАТИЧЕСКОЕ ИСТЕЧЕНИЕ
+# АВТОМАТИЧЕСКАЯ ПРОВЕРКА ИСТЁКШИХ ПОДПИСОК
 # ============================================================
 
 async def expiration_loop():
@@ -762,14 +862,23 @@ async def main():
         f"{SERVICE_NAME} starting..."
     )
 
+    # Проверка истёкших подписок
     asyncio.create_task(
         expiration_loop()
     )
 
+    # Запуск Telegram
     await dp.start_polling(
         bot
     )
 
 
+# ============================================================
+# START
+# ============================================================
+
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )
