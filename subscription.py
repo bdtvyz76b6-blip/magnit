@@ -1,925 +1,731 @@
+# subscription.py
+
+import base64
+import logging
 import os
-import time
 import threading
+import time
+from typing import Optional
+
 import requests
-
-from datetime import datetime, timedelta
-
 from dotenv import load_dotenv
 
-from database import (
-    save_subscription_link,
-    save_subscription_content,
-    get_all_users,
+from config import (
+    AUTO_SYNC_ENABLED,
+    AUTO_SYNC_INTERVAL,
+    GITHUB_BRANCH,
+    GITHUB_OWNER,
+    GITHUB_REPO,
+    GITHUB_TOKEN,
+    HIDE_SETTINGS,
+    NO_SERVERS_FILE,
+    PROFILE_TITLE,
+    PROFILE_UPDATE_INTERVAL,
+    SERVERS_FILE,
+    TRAFFIC_DOWNLOAD,
+    TRAFFIC_TOTAL,
+    TRAFFIC_UPLOAD,
 )
-
-# ============================================================
-# .ENV
-# ============================================================
+from database import (
+    build_subscription_link,
+    get_all_users,
+    get_user,
+    save_subscription_content,
+    save_subscription_link,
+)
 
 load_dotenv()
 
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
+logger = logging.getLogger(__name__)
 
-PUBLIC_SITE_URL = os.getenv(
-    "PUBLIC_SITE_URL",
-    "https://orelvpnrailoh-1.onrender.com",
-).rstrip("/")
-
-SUBSCRIPTION_PREFIX = os.getenv(
-    "SUBSCRIPTION_PREFIX",
-    "2ix847xy",
-).strip()
-
-# Telegram
-TELEGRAM_USERNAME = os.getenv(
-    "TELEGRAM_USERNAME",
-    "orelvpntopbot",
-).strip().lstrip("@")
-
-TELEGRAM_URL = os.getenv(
-    "TELEGRAM_URL",
-    f"https://t.me/{TELEGRAM_USERNAME}",
-).strip()
-
-# ============================================================
-# НАЗВАНИЕ МАГНИТ VPN
-# ============================================================
-
-PROFILE_TITLE = os.getenv(
-    "PROFILE_TITLE",
-    "𝗦𝗨𝗕 - 𝗠𝗔𝗚𝗡𝗜𝗧 𝗩𝗣𝗡 🧲",
-).strip()
-
-PROFILE_UPDATE_INTERVAL = int(
-    os.getenv(
-        "PROFILE_UPDATE_INTERVAL",
-        "1",
-    )
-)
-
-# ============================================================
-# HAPP — ТРАФИК
-# ============================================================
-
-# 0 = безлимит
-TRAFFIC_TOTAL = int(
-    os.getenv(
-        "TRAFFIC_TOTAL",
-        "0",
-    )
-)
-
-TRAFFIC_UPLOAD = int(
-    os.getenv(
-        "TRAFFIC_UPLOAD",
-        "0",
-    )
-)
-
-TRAFFIC_DOWNLOAD = int(
-    os.getenv(
-        "TRAFFIC_DOWNLOAD",
-        "0",
-    )
-)
-
-# ============================================================
-# HAPP — СКРЫТИЕ НАСТРОЕК
-# ============================================================
-
-HIDE_SETTINGS = os.getenv(
-    "HIDE_SETTINGS",
-    "1",
-).strip() == "1"
-
-# ============================================================
-# АВТОСИНХРОНИЗАЦИЯ
-# ============================================================
-
-AUTO_SYNC_ENABLED = os.getenv(
-    "AUTO_SYNC_ENABLED",
-    "1",
-).strip() == "1"
-
-try:
-    AUTO_SYNC_INTERVAL = int(
-        os.getenv(
-            "AUTO_SYNC_INTERVAL",
-            "600",
-        )
-    )
-except Exception:
-    AUTO_SYNC_INTERVAL = 600
 
 # ============================================================
 # GITHUB
 # ============================================================
 
-GITHUB_TOKEN = os.getenv(
-    "GITHUB_TOKEN",
-    "",
-).strip()
+GITHUB_API = (
+    f"https://api.github.com/repos/"
+    f"{GITHUB_OWNER}/{GITHUB_REPO}/contents"
+)
 
-OWNER = os.getenv(
-    "GITHUB_OWNER",
-    "bdtvyz76b6-blip",
-).strip()
 
-REPO = os.getenv(
-    "GITHUB_REPO",
-    "vpn-sub",
-).strip()
+def github_headers():
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "MAGNIT-VPN",
+    }
 
-BRANCH = os.getenv(
-    "GITHUB_BRANCH",
-    "main",
-).strip()
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
-# ============================================================
-# ФАЙЛЫ СЕРВЕРОВ
-# ============================================================
+    return headers
 
-SERVERS_FILE = os.getenv(
-    "SERVERS_FILE",
-    "servers.txt",
-).strip()
 
-NO_SERVERS_FILE = os.getenv(
-    "NO_SERVERS_FILE",
-    "no_servers.txt",
-).strip()
-
-# ============================================================
-# RAW GITHUB
-# ============================================================
-
-def raw_url(filename):
+def github_file_url(filename: str) -> str:
     return (
-        f"https://raw.githubusercontent.com/"
-        f"{OWNER}/{REPO}/{BRANCH}/{filename}"
+        f"{GITHUB_API}/{filename}"
+        f"?ref={GITHUB_BRANCH}"
     )
 
 
 # ============================================================
-# ЗАГРУЗКА ФАЙЛА GITHUB
+# ЗАГРУЗКА SERVERS.TXT
 # ============================================================
 
-def load_github_file(filename):
-    response = requests.get(
-        raw_url(filename),
-        timeout=20,
-    )
+def load_github_file(filename: str) -> str:
+    """
+    Загружает файл из GitHub.
 
-    if response.status_code != 200:
-        raise Exception(
-            f"Не удалось загрузить {filename}: "
-            f"HTTP {response.status_code}"
+    Если GitHub недоступен или файл не найден,
+    возвращает пустую строку.
+    """
+
+    try:
+        response = requests.get(
+            github_file_url(filename),
+            headers=github_headers(),
+            timeout=20,
         )
 
-    content = response.text.strip()
+        if response.status_code != 200:
+            logger.error(
+                "GitHub: не удалось получить %s: HTTP %s",
+                filename,
+                response.status_code,
+            )
+            return ""
 
-    if not content:
-        raise Exception(
-            f"Файл {filename} пустой"
+        data = response.json()
+
+        content = data.get("content", "")
+
+        if not content:
+            return ""
+
+        # GitHub отдаёт Base64
+        content = content.replace("\n", "")
+
+        try:
+            decoded = base64.b64decode(
+                content
+            ).decode("utf-8")
+
+            return decoded.strip()
+
+        except Exception:
+            logger.exception(
+                "Ошибка Base64 при загрузке %s",
+                filename,
+            )
+            return ""
+
+    except requests.RequestException:
+        logger.exception(
+            "Ошибка соединения с GitHub при загрузке %s",
+            filename,
         )
+        return ""
 
-    return content
+    except Exception:
+        logger.exception(
+            "Неожиданная ошибка загрузки %s",
+            filename,
+        )
+        return ""
 
 
 # ============================================================
-# АКТИВНЫЕ СЕРВЕРЫ
+# ПОЛУЧЕНИЕ СЕРВЕРОВ
 # ============================================================
 
-def load_servers():
-    return load_github_file(
-        SERVERS_FILE
+def load_servers() -> str:
+    """
+    Загружает основной список серверов.
+
+    servers.txt должен содержать VLESS-ссылки.
+    """
+
+    content = load_github_file(SERVERS_FILE)
+
+    if content:
+        return content.strip()
+
+    logger.warning(
+        "Основной %s пустой, пробуем %s",
+        SERVERS_FILE,
+        NO_SERVERS_FILE,
     )
 
-
-# ============================================================
-# СЕРВЕРЫ ДЛЯ НЕАКТИВНОЙ ПОДПИСКИ
-# ============================================================
-
-def load_no_servers():
-    return load_github_file(
+    fallback = load_github_file(
         NO_SERVERS_FILE
     )
 
+    return fallback.strip()
+
+
+def clean_servers(content: str) -> list[str]:
+    """
+    Оставляет только реальные VLESS-ссылки.
+    """
+
+    result = []
+
+    for line in content.splitlines():
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            continue
+
+        if line.startswith("vless://"):
+            result.append(line)
+
+    return result
+
 
 # ============================================================
-# ПЕРСОНАЛЬНАЯ СТРАНИЦА
+# HAPP HEADERS
 # ============================================================
 
-def get_subscription_link(user_id):
-    return (
-        f"{PUBLIC_SITE_URL}/s/"
-        f"{SUBSCRIPTION_PREFIX}"
-        f"{user_id}"
-    )
+def build_happ_headers(
+    user: Optional[dict] = None,
+) -> list[str]:
 
+    headers = [
+        f"#profile-title: {PROFILE_TITLE}",
+        (
+            "#profile-update-interval: "
+            f"{PROFILE_UPDATE_INTERVAL}"
+        ),
+        (
+            "#subscription-userinfo: "
+            f"upload={TRAFFIC_UPLOAD};"
+            f"download={TRAFFIC_DOWNLOAD};"
+            f"total={TRAFFIC_TOTAL}"
+        ),
+    ]
 
-# ============================================================
-# ПРЯМАЯ ССЫЛКА НА ПОДПИСКУ
-# ============================================================
+    if HIDE_SETTINGS:
 
-def get_subscription_content_url(user_id):
-    return (
-        f"{PUBLIC_SITE_URL}/sub/"
-        f"{SUBSCRIPTION_PREFIX}"
-        f"{user_id}"
-    )
+        headers.extend(
+            [
+                "#hide-settings: true",
+                "#happ-hide-settings: true",
+                "#hide_server_settings: true",
+                "#hidesettings: true",
+            ]
+        )
 
+    if user:
 
-# ============================================================
-# DATE → UNIX
-# ============================================================
+        username = user.get(
+            "username",
+            "",
+        )
 
-def date_to_timestamp(date):
-    if isinstance(date, datetime):
-        return int(date.timestamp())
+        first_name = user.get(
+            "first_name",
+            "",
+        )
 
-    value = str(date).strip()
+        user_id = user.get(
+            "user_id",
+            "",
+        )
 
-    for fmt in (
-        "%Y-%m-%d",
-        "%d.%m.%Y",
-    ):
-        try:
-            parsed = datetime.strptime(
-                value,
-                fmt,
+        if username:
+            announce = (
+                f"🧲 МАГНИТ VPN | "
+                f"@{username}"
             )
 
-            return int(
-                datetime.combine(
-                    parsed.date(),
-                    datetime.min.time(),
-                ).timestamp()
+        elif first_name:
+            announce = (
+                f"🧲 МАГНИТ VPN | "
+                f"{first_name}"
             )
 
-        except Exception:
-            pass
+        else:
+            announce = (
+                f"🧲 МАГНИТ VPN | "
+                f"ID {user_id}"
+            )
 
-    return 0
+        headers.append(
+            f"#announce: {announce}"
+        )
+
+    else:
+        headers.append(
+            "#announce: 🧲 МАГНИТ VPN"
+        )
+
+    return headers
 
 
 # ============================================================
-# HAPP TRAFFIC
+# ГЕНЕРАЦИЯ ПОДПИСКИ
 # ============================================================
 
-def build_traffic_header(
-    upload=TRAFFIC_UPLOAD,
-    download=TRAFFIC_DOWNLOAD,
-    total=TRAFFIC_TOTAL,
-    expire=0,
-):
-    return (
-        "#subscription-userinfo: "
-        f"upload={int(upload)}; "
-        f"download={int(download)}; "
-        f"total={int(total)}; "
-        f"expire={int(expire)}\n"
+def build_subscription_content(
+    user: Optional[dict] = None,
+) -> str:
+    """
+    Создаёт содержимое подписки Happ.
+
+    Формат:
+
+    #profile-title: ...
+    #profile-update-interval: ...
+    #subscription-userinfo: ...
+    ...
+    vless://...
+    """
+
+    servers_content = load_servers()
+
+    servers = clean_servers(
+        servers_content
     )
 
-
-# ============================================================
-# HAPP PROFILE HEADER
-# ============================================================
-
-def build_profile_header(
-    announce,
-    expire=0,
-    upload=TRAFFIC_UPLOAD,
-    download=TRAFFIC_DOWNLOAD,
-    total=TRAFFIC_TOTAL,
-):
-    hide = "true" if HIDE_SETTINGS else "false"
-
-    return (
-        f"#profile-title: {PROFILE_TITLE}\n"
-        f"#profile-update-interval: "
-        f"{PROFILE_UPDATE_INTERVAL}\n"
-        f"#subscription-userinfo: "
-        f"upload={int(upload)}; "
-        f"download={int(download)}; "
-        f"total={int(total)}; "
-        f"expire={int(expire)}\n"
-        f"#hide-settings: {hide}\n"
-        f"#happ-hide-settings: {hide}\n"
-        f"#hide_server_settings: {hide}\n"
-        f"#hidesettings: {hide}\n"
-        f"#announce: {announce}\n\n"
+    headers = build_happ_headers(
+        user
     )
+
+    lines = []
+
+    lines.extend(headers)
+
+    if servers:
+        lines.append("")
+        lines.extend(servers)
+
+    return "\n".join(lines).strip() + "\n"
 
 
 # ============================================================
 # СОХРАНЕНИЕ ПОДПИСКИ
 # ============================================================
 
-def save_user_subscription(
-    user_id,
-    content,
-):
-    link = get_subscription_link(
-        user_id
-    )
+def sync_user(
+    user_id: int,
+) -> bool:
+    """
+    Пересобирает подписку конкретного пользователя.
+    """
 
-    save_subscription_content(
-        user_id,
-        content,
-    )
+    user = get_user(user_id)
 
-    save_subscription_link(
-        user_id,
-        link,
-    )
+    if not user:
+        logger.warning(
+            "sync_user: пользователь %s не найден",
+            user_id,
+        )
+        return False
 
-    return link
-
-
-# ============================================================
-# НОВЫЙ ПОЛЬЗОВАТЕЛЬ
-# ============================================================
-
-def get_inactive_announce():
-    return (
-        "🔒 Подписка не активна • "
-        f"Оформите подписку через @{TELEGRAM_USERNAME}"
-    )
-
-
-NEW_USER_TEMPLATE = (
-    build_profile_header(
-        get_inactive_announce(),
-        expire=0,
-        upload=0,
-        download=0,
-        total=0,
-    )
-    +
-    "vless://00000000-0000-0000-0000-000000000000"
-    "@expired.invalid:443"
-    "?type=tcp"
-    "&security=reality"
-    "&sni=expired.invalid"
-    "&fp=chrome"
-    "&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    "&sid="
-    "&flow=xtls-rprx-vision"
-    "#⛔ Активируйте подписку"
-).strip()
-
-
-# ============================================================
-# СОЗДАНИЕ ПОДПИСКИ НОВОМУ ПОЛЬЗОВАТЕЛЮ
-# ============================================================
-
-def create_user_subscription(user_id):
-
-    link = save_user_subscription(
-        user_id,
-        NEW_USER_TEMPLATE,
-    )
-
-    print(
-        f"🆕 Создана подписка МАГНИТ VPN "
-        f"для пользователя {user_id}"
-    )
-
-    print(
-        f"🔗 Страница: {link}"
-    )
-
-    print(
-        "🔗 Subscription URL: "
-        f"{get_subscription_content_url(user_id)}"
-    )
-
-    return link
-
-
-# ============================================================
-# ФОРМАТ ДАТЫ
-# ============================================================
-
-def format_subscription_date(date):
-
-    if isinstance(date, datetime):
-        return date.strftime(
-            "%d.%m.%Y"
+    try:
+        token = user.get(
+            "token",
+            "",
         )
 
-    if hasattr(date, "strftime"):
-        try:
-            return date.strftime(
-                "%d.%m.%Y"
+        if not token:
+            logger.error(
+                "У пользователя %s отсутствует token",
+                user_id,
             )
-        except Exception:
-            pass
+            return False
 
-    value = str(date).strip()
-
-    for fmt in (
-        "%Y-%m-%d",
-        "%d.%m.%Y",
-    ):
-        try:
-            parsed = datetime.strptime(
-                value,
-                fmt,
-            )
-
-            return parsed.strftime(
-                "%d.%m.%Y"
-            )
-
-        except Exception:
-            pass
-
-    return value
-
-
-# ============================================================
-# СОЗДАНИЕ ПОДПИСКИ НА N ДНЕЙ
-# ============================================================
-
-def create_subscription(
-    user_id,
-    days=30,
-):
-
-    days = int(days)
-
-    if days <= 0:
-        raise ValueError(
-            "Количество дней должно быть больше 0"
+        content = build_subscription_content(
+            user
         )
 
-    expire_date = (
-        datetime.now().date()
-        + timedelta(days=days)
-    )
+        if not content:
+            logger.error(
+                "Пустое содержимое подписки "
+                "для пользователя %s",
+                user_id,
+            )
+            return False
 
-    display_date = expire_date.strftime(
-        "%d.%m.%Y"
-    )
-
-    return activate_subscription_file(
-        user_id,
-        display_date,
-    )
-
-
-# ============================================================
-# АКТИВНАЯ ПОДПИСКА
-# ============================================================
-
-def activate_subscription_file(
-    user_id,
-    date,
-):
-
-    servers = load_servers()
-
-    display_date = format_subscription_date(
-        date
-    )
-
-    expire_timestamp = date_to_timestamp(
-        display_date
-    )
-
-    announce = (
-        f"🟢 МАГНИТ VPN • "
-        f"активна до {display_date} • "
-        f"🆔 ID: {user_id}"
-    )
-
-    content = (
-        build_profile_header(
-            announce,
-            expire=expire_timestamp,
-            upload=0,
-            download=0,
-            total=TRAFFIC_TOTAL,
+        link = build_subscription_link(
+            token
         )
-        + servers
+
+        save_subscription_content(
+            user_id,
+            content,
+        )
+
+        save_subscription_link(
+            user_id,
+            link,
+        )
+
+        logger.info(
+            "Подписка пользователя %s синхронизирована",
+            user_id,
+        )
+
+        return True
+
+    except Exception:
+        logger.exception(
+            "Ошибка синхронизации пользователя %s",
+            user_id,
+        )
+        return False
+
+
+# ============================================================
+# СОЗДАНИЕ ПОДПИСКИ ПРИ СОЗДАНИИ USER
+# ============================================================
+
+def ensure_subscription(
+    user_id: int,
+) -> Optional[str]:
+    """
+    Гарантирует наличие ссылки и содержимого подписки.
+
+    Возвращает ссылку.
+    """
+
+    user = get_user(user_id)
+
+    if not user:
+        return None
+
+    token = user.get(
+        "token",
+        "",
     )
 
-    link = save_user_subscription(
-        user_id,
-        content,
+    if not token:
+        return None
+
+    link = user.get(
+        "subscription_link",
+        "",
     )
 
-    print(
-        f"🟢 МАГНИТ VPN: "
-        f"{user_id} → до {display_date}"
+    content = user.get(
+        "subscription_content",
+        "",
     )
 
-    print(
-        "📊 Трафик: ♾️ безлимит"
-        if TRAFFIC_TOTAL == 0
-        else f"📊 Лимит: {TRAFFIC_TOTAL} байт"
-    )
+    if not link:
+        link = build_subscription_link(
+            token
+        )
 
-    print(
-        f"🔗 Страница: {link}"
-    )
+        save_subscription_link(
+            user_id,
+            link,
+        )
+
+    if not content:
+        sync_user(
+            user_id
+        )
 
     return link
-
-
-# ============================================================
-# АКТИВАЦИЯ
-# ============================================================
-
-def activate_user_subscription(
-    user_id,
-    days,
-):
-    return create_subscription(
-        user_id,
-        days,
-    )
-
-
-# ============================================================
-# ОБНОВЛЕНИЕ ПО ДАТЕ
-# ============================================================
-
-def update_subscription_file(
-    user_id,
-    date,
-):
-
-    display_date = format_subscription_date(
-        date
-    )
-
-    return activate_subscription_file(
-        user_id,
-        display_date,
-    )
-
-
-# ============================================================
-# ИСТЕЧЕНИЕ ПОДПИСКИ
-# ============================================================
-
-def expire_subscription(user_id):
-
-    no_servers = load_no_servers()
-
-    announce = (
-        "🔴 МАГНИТ VPN • "
-        "Подписка истекла • "
-        f"Продлите через @{TELEGRAM_USERNAME}"
-    )
-
-    content = (
-        build_profile_header(
-            announce,
-            expire=0,
-            upload=0,
-            download=0,
-            total=0,
-        )
-        + no_servers
-    )
-
-    link = save_user_subscription(
-        user_id,
-        content,
-    )
-
-    print(
-        f"🔴 МАГНИТ VPN: "
-        f"{user_id} — подписка отключена"
-    )
-
-    return link
-
-
-# ============================================================
-# АКТИВНЫЕ ТАРИФЫ
-# ============================================================
-
-ACTIVE_SUBSCRIPTIONS = {
-    "vip",
-    "trial",
-
-    # Совместимость со старыми пользователями
-    "👑 Орёл VPN",
-    "🎁 Пробный период",
-}
 
 
 # ============================================================
 # СИНХРОНИЗАЦИЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
 # ============================================================
 
-def sync_all_active_users():
+def sync_all_users() -> dict:
+    """
+    Пересобирает подписки всех пользователей.
+    """
 
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("🔄 МАГНИТ VPN — синхронизация")
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    users = get_all_users()
 
-    try:
-        servers = load_servers()
-        no_servers = load_no_servers()
-        users = get_all_users()
-
-    except Exception as e:
-
-        print(
-            f"❌ Ошибка загрузки данных: {e}"
-        )
-
-        return {
-            "updated": 0,
-            "skipped": 0,
-            "expired": 0,
-            "errors": 1,
-        }
-
-    updated = 0
+    success = 0
+    failed = 0
     skipped = 0
-    expired = 0
-    errors = 0
-
-    today = datetime.now().date()
 
     for user in users:
 
-        user_id = user[0]
+        user_id = user.get(
+            "user_id"
+        )
 
-        try:
+        if not user_id:
+            skipped += 1
+            continue
 
-            subscription = user[3]
-            subscription_until = user[4]
+        if sync_user(user_id):
+            success += 1
+        else:
+            failed += 1
 
-            # ==================================================
-            # НЕАКТИВНА
-            # ==================================================
-
-            if subscription not in ACTIVE_SUBSCRIPTIONS:
-
-                content = (
-                    build_profile_header(
-                        get_inactive_announce(),
-                        expire=0,
-                        upload=0,
-                        download=0,
-                        total=0,
-                    )
-                    + no_servers
-                )
-
-                save_user_subscription(
-                    user_id,
-                    content,
-                )
-
-                skipped += 1
-
-                print(
-                    f"{user_id} — ⚪ неактивна"
-                )
-
-                continue
-
-            # ==================================================
-            # НЕТ ДАТЫ
-            # ==================================================
-
-            if not subscription_until:
-
-                content = (
-                    build_profile_header(
-                        get_inactive_announce(),
-                        expire=0,
-                        upload=0,
-                        download=0,
-                        total=0,
-                    )
-                    + no_servers
-                )
-
-                save_user_subscription(
-                    user_id,
-                    content,
-                )
-
-                expired += 1
-
-                print(
-                    f"{user_id} — 🔴 нет даты"
-                )
-
-                continue
-
-            # ==================================================
-            # ПАРСИНГ ДАТЫ
-            # ==================================================
-
-            try:
-
-                expire_date = datetime.strptime(
-                    str(subscription_until),
-                    "%Y-%m-%d",
-                ).date()
-
-            except Exception:
-
-                print(
-                    f"❌ Неверная дата у {user_id}: "
-                    f"{subscription_until}"
-                )
-
-                content = (
-                    build_profile_header(
-                        "🔴 Ошибка даты подписки",
-                        expire=0,
-                        upload=0,
-                        download=0,
-                        total=0,
-                    )
-                    + no_servers
-                )
-
-                save_user_subscription(
-                    user_id,
-                    content,
-                )
-
-                errors += 1
-
-                continue
-
-            # ==================================================
-            # ИСТЕКЛА
-            # ==================================================
-
-            if expire_date < today:
-
-                content = (
-                    build_profile_header(
-                        (
-                            "🔴 МАГНИТ VPN • "
-                            "Подписка истекла • "
-                            f"Продлите через "
-                            f"@{TELEGRAM_USERNAME}"
-                        ),
-                        expire=0,
-                        upload=0,
-                        download=0,
-                        total=0,
-                    )
-                    + no_servers
-                )
-
-                save_user_subscription(
-                    user_id,
-                    content,
-                )
-
-                expired += 1
-
-                print(
-                    f"{user_id} — 🔴 истекла"
-                )
-
-                continue
-
-            # ==================================================
-            # АКТИВНА
-            # ==================================================
-
-            display_date = expire_date.strftime(
-                "%d.%m.%Y"
-            )
-
-            expire_timestamp = int(
-                datetime.combine(
-                    expire_date,
-                    datetime.min.time(),
-                ).timestamp()
-            )
-
-            announce = (
-                f"🟢 МАГНИТ VPN • "
-                f"активна до {display_date} • "
-                f"🆔 ID: {user_id}"
-            )
-
-            content = (
-                build_profile_header(
-                    announce,
-                    expire=expire_timestamp,
-                    upload=0,
-                    download=0,
-                    total=TRAFFIC_TOTAL,
-                )
-                + servers
-            )
-
-            save_user_subscription(
-                user_id,
-                content,
-            )
-
-            updated += 1
-
-            print(
-                f"{user_id} — "
-                f"🟢 до {display_date}"
-            )
-
-        except Exception as e:
-
-            errors += 1
-
-            print(
-                f"❌ Ошибка пользователя "
-                f"{user_id}: {e}"
-            )
-
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("✅ Синхронизация завершена")
-    print(f"🟢 Обновлено: {updated}")
-    print(f"🔴 Истекло: {expired}")
-    print(f"⚪ Неактивно: {skipped}")
-    print(f"❌ Ошибок: {errors}")
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    return {
-        "updated": updated,
+    result = {
+        "total": len(users),
+        "success": success,
+        "failed": failed,
         "skipped": skipped,
-        "expired": expired,
-        "errors": errors,
     }
 
-
-# ============================================================
-# ОБНОВЛЕНИЕ СЕРВЕРОВ ИЗ АДМИНКИ
-# ============================================================
-
-def sync_servers_update():
-
-    print(
-        "🔄 МАГНИТ VPN — "
-        "обновление серверов из админки"
+    logger.info(
+        "Полная синхронизация: %s",
+        result,
     )
 
-    return sync_all_active_users()
+    return result
 
 
 # ============================================================
-# AUTO SYNC
+# СИНХРОНИЗАЦИЯ АКТИВНЫХ
 # ============================================================
 
-def _auto_sync_worker():
+def sync_all_active_users() -> dict:
+    """
+    Синхронизирует пользователей,
+    у которых есть активная/просроченная подписка.
 
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("🤖 МАГНИТ VPN — автосинхронизация")
-    print(
-        f"⏱ Интервал: "
-        f"{AUTO_SYNC_INTERVAL} секунд"
+    ВАЖНО:
+    здесь нет никакой проверки устройств.
+    """
+
+    users = get_all_users()
+
+    success = 0
+    failed = 0
+    skipped = 0
+
+    for user in users:
+
+        user_id = user.get(
+            "user_id"
+        )
+
+        if not user_id:
+            skipped += 1
+            continue
+
+        subscription_until = user.get(
+            "subscription_until",
+            "",
+        )
+
+        subscription = user.get(
+            "subscription",
+            "none",
+        )
+
+        # Пользователям без подписки
+        # синхронизация не обязательна.
+        if (
+            not subscription_until
+            and subscription == "none"
+        ):
+            skipped += 1
+            continue
+
+        if sync_user(user_id):
+            success += 1
+        else:
+            failed += 1
+
+    result = {
+        "total": len(users),
+        "success": success,
+        "failed": failed,
+        "skipped": skipped,
+    }
+
+    logger.info(
+        "Синхронизация активных: %s",
+        result,
     )
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    time.sleep(15)
+    return result
+
+
+# ============================================================
+# ФОНОВАЯ АВТОСИНХРОНИЗАЦИЯ
+# ============================================================
+
+_sync_thread = None
+_sync_started = False
+
+
+def _auto_sync_loop():
+    global _sync_started
+
+    logger.info(
+        "Автосинхронизация MAGNIT VPN запущена"
+    )
 
     while True:
 
         try:
+            time.sleep(
+                max(
+                    AUTO_SYNC_INTERVAL,
+                    60,
+                )
+            )
+
+            logger.info(
+                "Запуск автоматической "
+                "синхронизации подписок"
+            )
 
             sync_all_active_users()
 
-        except Exception as e:
-
-            print(
-                f"❌ Ошибка автосинхронизации: {e}"
+        except Exception:
+            logger.exception(
+                "Ошибка фоновой синхронизации"
             )
 
-        time.sleep(
-            AUTO_SYNC_INTERVAL
+
+def start_auto_sync():
+    """
+    Запускает один фоновый поток.
+    """
+
+    global _sync_thread
+    global _sync_started
+
+    if not AUTO_SYNC_ENABLED:
+        logger.info(
+            "AUTO_SYNC_ENABLED отключён"
         )
+        return
 
+    if _sync_started:
+        logger.warning(
+            "Автосинхронизация уже запущена"
+        )
+        return
 
-# ============================================================
-# ЗАПУСК
-# ============================================================
+    _sync_started = True
 
-if AUTO_SYNC_ENABLED:
-
-    sync_thread = threading.Thread(
-        target=_auto_sync_worker,
+    _sync_thread = threading.Thread(
+        target=_auto_sync_loop,
+        name="magnit-vpn-sync",
         daemon=True,
-        name="magnit-vpn-auto-sync",
     )
 
-    sync_thread.start()
+    _sync_thread.start()
+
+
+# ============================================================
+# ПРИНУДИТЕЛЬНАЯ СИНХРОНИЗАЦИЯ
+# ============================================================
+
+def force_sync() -> dict:
+    """
+    Полная ручная синхронизация.
+    Используется кнопкой админ-панели.
+    """
+
+    logger.info(
+        "Запущена ручная синхронизация"
+    )
+
+    return sync_all_users()
+
+
+# ============================================================
+# ПРОВЕРКА КОНФИГУРАЦИИ
+# ============================================================
+
+def check_github_connection() -> bool:
+    """
+    Проверяет доступность servers.txt.
+    """
+
+    try:
+        response = requests.get(
+            github_file_url(SERVERS_FILE),
+            headers=github_headers(),
+            timeout=15,
+        )
+
+        if response.status_code == 200:
+            return True
+
+        logger.error(
+            "GitHub проверка: HTTP %s",
+            response.status_code,
+        )
+
+        return False
+
+    except requests.RequestException:
+        logger.exception(
+            "GitHub проверка завершилась ошибкой"
+        )
+        return False
+
+
+# ============================================================
+# ИНФОРМАЦИЯ О СЕРВЕРАХ
+# ============================================================
+
+def get_servers_info() -> dict:
+    """
+    Возвращает информацию для админ-панели.
+    """
+
+    content = load_servers()
+
+    servers = clean_servers(
+        content
+    )
+
+    return {
+        "count": len(servers),
+        "servers": servers,
+        "source": (
+            f"{GITHUB_OWNER}/"
+            f"{GITHUB_REPO}/"
+            f"{SERVERS_FILE}"
+        ),
+    }
+
+
+# ============================================================
+# ТЕСТ
+# ============================================================
+
+if __name__ == "__main__":
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            "%(asctime)s | "
+            "%(levelname)s | "
+            "%(name)s | "
+            "%(message)s"
+        ),
+    )
+
+    print(
+        "🧲 MAGNIT VPN — subscription.py"
+    )
+
+    print(
+        "GitHub:",
+        "OK"
+        if check_github_connection()
+        else "ERROR",
+    )
+
+    info = get_servers_info()
+
+    print(
+        "Серверов:",
+        info["count"],
+    )
+
+    if info["count"]:
+        for server in info["servers"]:
+            print(server)
