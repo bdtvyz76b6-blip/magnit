@@ -13,7 +13,6 @@ from database import (
     save_subscription_content,
 )
 
-# subscription.py
 try:
     from subscription import ensure_subscription
 except Exception:
@@ -30,14 +29,19 @@ SERVICE_NAME = os.getenv(
 ).strip()
 
 PUBLIC_URL = os.getenv(
-    "PUBLIC_URL",
-    "https://magnit-grcm.onrender.com",
+    "PUBLIC_SITE_URL",
+    "https://orelvpnrailoh-1.onrender.com",
 ).rstrip("/")
 
 TELEGRAM_USERNAME = os.getenv(
     "TELEGRAM_USERNAME",
-    "orelvpntopbot",
+    "Magvpnobot",
 ).strip().lstrip("@")
+
+TELEGRAM_URL = os.getenv(
+    "TELEGRAM_URL",
+    "https://t.me/Magvpnobot",
+).strip()
 
 PROFILE_TITLE = os.getenv(
     "PROFILE_TITLE",
@@ -45,6 +49,26 @@ PROFILE_TITLE = os.getenv(
 ).strip()
 
 APP_VERSION = "magnit-2026.09.08"
+
+GITHUB_OWNER = os.getenv(
+    "GITHUB_OWNER",
+    "bdtvyz76b6-blip",
+).strip()
+
+GITHUB_REPO = os.getenv(
+    "GITHUB_REPO",
+    "magnit",
+).strip()
+
+GITHUB_BRANCH = os.getenv(
+    "GITHUB_BRANCH",
+    "main",
+).strip()
+
+GITHUB_USERS_PATH = os.getenv(
+    "GITHUB_USERS_PATH",
+    "users",
+).strip().strip("/")
 
 
 # ============================================================
@@ -128,7 +152,10 @@ def get_days_left(value):
     if seconds <= 0:
         return 0
 
-    return max(1, int(seconds / 86400))
+    return max(
+        1,
+        int(seconds / 86400),
+    )
 
 
 def format_date(value):
@@ -141,15 +168,42 @@ def format_date(value):
 
 
 # ============================================================
-# URL ПОДПИСКИ
+# GITHUB RAW URL
+# ============================================================
+
+def build_github_subscription_url(user_id):
+    """
+    Ссылка на персональный файл:
+
+    users/{user_id}.txt
+
+    Пример:
+
+    https://raw.githubusercontent.com/
+    bdtvyz76b6-blip/magnit/main/users/123456789.txt
+    """
+
+    return (
+        "https://raw.githubusercontent.com/"
+        f"{quote(GITHUB_OWNER, safe='')}/"
+        f"{quote(GITHUB_REPO, safe='')}/"
+        f"{quote(GITHUB_BRANCH, safe='')}/"
+        f"{quote(GITHUB_USERS_PATH, safe='')}/"
+        f"{quote(str(user_id), safe='')}.txt"
+    )
+
+
+# ============================================================
+# HTTPS ССЫЛКА ПОДПИСКИ
 # ============================================================
 
 def build_subscription_url(token):
     """
-    Обычная HTTPS ссылка подписки.
+    Серверная ссылка подписки.
 
-    Например:
-    https://magnit-grcm.onrender.com/sub/ABC123
+    Используется как fallback:
+
+    https://orelvpnrailoh-1.onrender.com/sub/TOKEN
     """
 
     return (
@@ -158,24 +212,63 @@ def build_subscription_url(token):
     )
 
 
-def build_happ_url(token):
+# ============================================================
+# HAPP
+# ============================================================
+
+def build_happ_url(subscription_url):
     """
-    Прямая ссылка для импорта подписки в Happ.
-
-    Формат:
-
-    happ://add/https://domain/sub/token
-
-    Happ открывается и получает персональную
-    ссылку подписки.
+    Импорт подписки в Happ.
     """
-
-    subscription_url = build_subscription_url(token)
 
     return (
         "happ://add/"
-        + quote(subscription_url, safe=":/?=&")
+        + quote(
+            subscription_url,
+            safe=":/?=&",
+        )
     )
+
+
+# ============================================================
+# ПОЛУЧЕНИЕ АКТУАЛЬНОЙ ССЫЛКИ
+# ============================================================
+
+def get_user_subscription_url(user):
+    """
+    Приоритет:
+
+    1. GitHub raw users/{user_id}.txt
+    2. subscription_link из БД
+    3. серверная /sub/{token}
+    """
+
+    user_id = user.get("user_id")
+
+    if user_id:
+        github_url = build_github_subscription_url(
+            user_id
+        )
+
+        return github_url
+
+    saved_url = (
+        user.get("subscription_link")
+        or ""
+    ).strip()
+
+    if saved_url:
+        return saved_url
+
+    token = (
+        user.get("token")
+        or ""
+    ).strip()
+
+    if token:
+        return build_subscription_url(token)
+
+    return ""
 
 
 # ============================================================
@@ -184,75 +277,122 @@ def build_happ_url(token):
 
 def ensure_user_subscription(user_id):
     """
-    Если subscription_content уже есть —
-    просто возвращаем его.
+    Создаёт/обновляет персональную подписку
+    через subscription.py.
 
-    Если нет —
-    пробуем создать через subscription.py.
+    subscription.py:
+        - получает сервера
+        - формирует Happ subscription
+        - создаёт users/{user_id}.txt
+        - возвращает raw GitHub URL
+        - сохраняет ссылку в БД
     """
 
     try:
-        content = get_subscription_content(user_id)
+        content = get_subscription_content(
+            user_id
+        )
     except Exception:
         content = ""
 
-    if content:
-        return content
-
     # --------------------------------------------------------
-    # Пробуем использовать subscription.py
+    # Пытаемся синхронизировать
     # --------------------------------------------------------
 
     if ensure_subscription is not None:
+
         try:
-            result = ensure_subscription(user_id)
 
-            # ensure_subscription может вернуть:
-            # строку
-            if isinstance(result, str) and result.strip():
-                content = result.strip()
+            result = ensure_subscription(
+                user_id
+            )
 
-            # или dict
+            if isinstance(result, str):
+
+                result = result.strip()
+
+                if result:
+                    # Если это raw URL,
+                    # content брать не нужно.
+                    if result.startswith(
+                        "http://"
+                    ) or result.startswith(
+                        "https://"
+                    ):
+                        return result
+
+                    content = result
+
             elif isinstance(result, dict):
-                content = (
+
+                link = (
+                    result.get("url")
+                    or result.get("link")
+                    or result.get("subscription_link")
+                    or ""
+                ).strip()
+
+                if link:
+                    return link
+
+                new_content = (
                     result.get("content")
-                    or result.get("subscription_content")
+                    or result.get(
+                        "subscription_content"
+                    )
                     or ""
                 )
 
+                if new_content:
+                    content = new_content.strip()
+
         except Exception as e:
+
             print(
-                f"[WEB] ensure_subscription error "
-                f"for {user_id}: {e}"
+                f"[WEB] ensure_subscription "
+                f"error for {user_id}: {e}"
             )
 
     # --------------------------------------------------------
-    # Проверяем БД ещё раз
+    # БД
     # --------------------------------------------------------
 
     if not content:
+
         try:
-            content = get_subscription_content(user_id)
+            content = get_subscription_content(
+                user_id
+            )
         except Exception:
             content = ""
 
-    # --------------------------------------------------------
-    # Если получили — сохраняем
-    # --------------------------------------------------------
-
     if content:
+
         try:
+
             save_subscription_content(
                 user_id,
                 content,
             )
+
         except Exception as e:
+
             print(
-                f"[WEB] save_subscription_content error "
-                f"for {user_id}: {e}"
+                "[WEB] "
+                "save_subscription_content "
+                f"error: {e}"
             )
 
-    return content or ""
+    # --------------------------------------------------------
+    # ВАЖНО
+    #
+    # Даже если subscription.py вернул content,
+    # основной URL пользователя — GitHub raw.
+    # --------------------------------------------------------
+
+    return build_github_subscription_url(
+        user_id
+    )
 
 
 # ============================================================
@@ -267,21 +407,31 @@ async def index():
 
     return f"""
 <!doctype html>
+
 <html lang="ru">
+
 <head>
+
 <meta charset="utf-8">
 
 <meta
     name="viewport"
-    content="width=device-width,
-    initial-scale=1,
-    maximum-scale=1,
-    viewport-fit=cover"
+    content="
+        width=device-width,
+        initial-scale=1,
+        maximum-scale=1,
+        viewport-fit=cover
+    "
 >
 
-<meta name="theme-color" content="#050505">
+<meta
+    name="theme-color"
+    content="#050505"
+>
 
-<title>{html.escape(SERVICE_NAME)}</title>
+<title>
+    {html.escape(SERVICE_NAME)}
+</title>
 
 <style>
 
@@ -297,6 +447,7 @@ body {{
 }}
 
 body {{
+
     min-height: 100vh;
 
     background:
@@ -333,13 +484,15 @@ body {{
 }}
 
 .card {{
+
     width: min(92%, 520px);
 
     padding: 35px;
 
     border-radius: 28px;
 
-    background: rgba(18,18,20,.78);
+    background:
+        rgba(18,18,20,.78);
 
     border:
         1px solid rgba(255,255,255,.08);
@@ -353,6 +506,7 @@ body {{
 }}
 
 .logo {{
+
     width: 76px;
     height: 76px;
 
@@ -378,6 +532,7 @@ body {{
 }}
 
 h1 {{
+
     margin: 0;
 
     font-size: 34px;
@@ -385,11 +540,14 @@ h1 {{
 }}
 
 p {{
+
     color: #929298;
+
     line-height: 1.5;
 }}
 
 .button {{
+
     display: block;
 
     margin-top: 25px;
@@ -399,6 +557,7 @@ p {{
     border-radius: 17px;
 
     background: #fff;
+
     color: #000;
 
     text-decoration: none;
@@ -407,15 +566,20 @@ p {{
 }}
 
 </style>
+
 </head>
 
 <body>
 
 <div class="card">
 
-    <div class="logo">🧲</div>
+    <div class="logo">
+        🧲
+    </div>
 
-    <h1>{html.escape(SERVICE_NAME)}</h1>
+    <h1>
+        {html.escape(SERVICE_NAME)}
+    </h1>
 
     <p>
         Быстрый и защищённый VPN
@@ -424,7 +588,7 @@ p {{
 
     <a
         class="button"
-        href="https://t.me/{html.escape(TELEGRAM_USERNAME)}"
+        href="{html.escape(TELEGRAM_URL, quote=True)}"
     >
         Открыть Telegram
     </a>
@@ -432,6 +596,7 @@ p {{
 </div>
 
 </body>
+
 </html>
 """
 
@@ -469,62 +634,102 @@ async def subscription(token: str):
             detail="Subscription not found",
         )
 
-    # --------------------------------------------------------
-    # Сначала ищем пользователя по token
-    # --------------------------------------------------------
-
     try:
-        user = get_user_by_token(token)
-    except Exception as e:
-        print(f"[WEB] get_user_by_token error: {e}")
-        user = None
 
-    # --------------------------------------------------------
-    # Fallback — если функция отсутствует/не сработала
-    # --------------------------------------------------------
+        user = get_user_by_token(
+            token
+        )
+
+    except Exception as e:
+
+        print(
+            f"[WEB] get_user_by_token "
+            f"error: {e}"
+        )
+
+        user = None
 
     if not user:
 
-        try:
-            # Некоторые старые БД могли хранить token
-            # иначе. Здесь просто сообщаем 404.
-            raise HTTPException(
-                status_code=404,
-                detail="Subscription not found",
-            )
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
 
-        except HTTPException:
-            raise
-
-    # --------------------------------------------------------
-    # Получаем user_id
-    # --------------------------------------------------------
-
-    user_id = user.get("user_id")
+    user_id = user.get(
+        "user_id"
+    )
 
     if not user_id:
+
         raise HTTPException(
             status_code=404,
             detail="Subscription user not found",
         )
 
     # --------------------------------------------------------
-    # ВАЖНО:
-    #
-    # если subscription_content пустой,
-    # автоматически создаём его.
+    # Проверяем срок подписки
     # --------------------------------------------------------
 
-    content = ensure_user_subscription(user_id)
+    subscription_until = (
+        user.get(
+            "subscription_until"
+        )
+        or ""
+    )
+
+    if not is_subscription_active(
+        subscription_until
+    ):
+
+        raise HTTPException(
+            status_code=403,
+            detail="Subscription expired",
+        )
+
+    # --------------------------------------------------------
+    # Получаем содержимое
+    # --------------------------------------------------------
+
+    try:
+
+        content = get_subscription_content(
+            user_id
+        )
+
+    except Exception:
+
+        content = ""
+
+    # --------------------------------------------------------
+    # Если пусто — создаём
+    # --------------------------------------------------------
 
     if not content:
+
+        ensure_user_subscription(
+            user_id
+        )
+
+        try:
+
+            content = get_subscription_content(
+                user_id
+            )
+
+        except Exception:
+
+            content = ""
+
+    if not content:
+
         raise HTTPException(
             status_code=503,
             detail="Subscription could not be generated",
         )
 
     # --------------------------------------------------------
-    # Возвращаем чистую подписку
+    # Ответ
     # --------------------------------------------------------
 
     response = PlainTextResponse(
@@ -535,9 +740,21 @@ async def subscription(token: str):
     for key, value in NO_CACHE_HEADERS.items():
         response.headers[key] = value
 
-    # Чтобы Happ точно воспринимал ответ
-    response.headers["Content-Disposition"] = (
-        'inline; filename="subscription.txt"'
+    response.headers[
+        "Content-Disposition"
+    ] = (
+        'inline; filename="magnit.txt"'
+    )
+
+    response.headers[
+        "profile-title"
+    ] = PROFILE_TITLE
+
+    response.headers[
+        "profile-update-interval"
+    ] = os.getenv(
+        "PROFILE_UPDATE_INTERVAL",
+        "1",
     )
 
     return response
@@ -554,24 +771,36 @@ async def subscription(token: str):
 async def subscription_page(token: str):
 
     if not token:
+
         raise HTTPException(
             status_code=404,
             detail="Not found",
         )
 
     try:
-        user = get_user_by_token(token)
+
+        user = get_user_by_token(
+            token
+        )
+
     except Exception as e:
-        print(f"[WEB] user lookup error: {e}")
+
+        print(
+            f"[WEB] user lookup error: {e}"
+        )
+
         user = None
 
     if not user:
+
         raise HTTPException(
             status_code=404,
             detail="Not found",
         )
 
-    user_id = user.get("user_id")
+    user_id = user.get(
+        "user_id"
+    )
 
     first_name = (
         user.get("first_name")
@@ -585,7 +814,9 @@ async def subscription_page(token: str):
     )
 
     subscription_until = (
-        user.get("subscription_until")
+        user.get(
+            "subscription_until"
+        )
         or ""
     )
 
@@ -597,12 +828,45 @@ async def subscription_page(token: str):
         subscription_until
     )
 
-    subscription_url = build_subscription_url(
-        token
+    # --------------------------------------------------------
+    # Генерируем GitHub файл
+    # --------------------------------------------------------
+
+    subscription_url = (
+        get_user_subscription_url(
+            user
+        )
     )
 
+    if user_id:
+
+        try:
+
+            github_url = (
+                ensure_user_subscription(
+                    user_id
+                )
+            )
+
+            if github_url:
+
+                subscription_url = (
+                    github_url
+                )
+
+        except Exception as e:
+
+            print(
+                f"[WEB] subscription "
+                f"generation error: {e}"
+            )
+
+    # --------------------------------------------------------
+    # Happ
+    # --------------------------------------------------------
+
     happ_url = build_happ_url(
-        token
+        subscription_url
     )
 
     status = (
@@ -624,17 +888,6 @@ async def subscription_page(token: str):
     )
 
     # --------------------------------------------------------
-    # Пытаемся создать подписку заранее
-    # --------------------------------------------------------
-
-    try:
-        ensure_user_subscription(user_id)
-    except Exception as e:
-        print(
-            f"[WEB] pre-generate error: {e}"
-        )
-
-    # --------------------------------------------------------
     # HTML
     # --------------------------------------------------------
 
@@ -649,10 +902,12 @@ async def subscription_page(token: str):
 
 <meta
     name="viewport"
-    content="width=device-width,
-    initial-scale=1,
-    maximum-scale=1,
-    viewport-fit=cover"
+    content="
+        width=device-width,
+        initial-scale=1,
+        maximum-scale=1,
+        viewport-fit=cover
+    "
 >
 
 <meta
@@ -1076,7 +1331,10 @@ body {{
         </div>
 
         <div class="value">
-            {escape(first_name, "Пользователь")}
+            {escape(
+                first_name,
+                "Пользователь"
+            )}
         </div>
 
     </section>
@@ -1097,6 +1355,7 @@ body {{
             {status}
 
         </div>
+
 
         <div
             style="
@@ -1150,7 +1409,9 @@ body {{
             </div>
 
             <div class="value">
-                {format_date(subscription_until)}
+                {format_date(
+                    subscription_until
+                )}
             </div>
 
         </div>
@@ -1170,7 +1431,10 @@ body {{
 
         <a
             class="primary"
-            href="{html.escape(happ_url, quote=True)}"
+            href="{html.escape(
+                happ_url,
+                quote=True
+            )}"
         >
             🧲 Подключить через Happ
         </a>
@@ -1196,7 +1460,10 @@ body {{
             <input
                 id="subUrl"
                 readonly
-                value="{html.escape(subscription_url, quote=True)}"
+                value="{html.escape(
+                    subscription_url,
+                    quote=True
+                )}"
             >
 
             <button
@@ -1246,7 +1513,10 @@ body {{
 
         <a
             class="primary"
-            href="https://t.me/{html.escape(TELEGRAM_USERNAME)}"
+            href="{html.escape(
+                TELEGRAM_URL,
+                quote=True
+            )}"
         >
             💬 Открыть поддержку
         </a>
@@ -1340,7 +1610,10 @@ async function copySubscription() {{
 # ============================================================
 
 @app.exception_handler(404)
-async def not_found(request, exc):
+async def not_found(
+    request,
+    exc,
+):
 
     return JSONResponse(
         status_code=404,
