@@ -6,20 +6,49 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 
-from config import (
-    SERVICE_NAME,
-    PUBLIC_URL,
-    TELEGRAM_USERNAME,
-)
-
 from database import (
     get_user,
+    get_user_by_token,
     get_subscription_content,
+    save_subscription_content,
 )
+
+# subscription.py
+try:
+    from subscription import ensure_subscription
+except Exception:
+    ensure_subscription = None
 
 
 # ============================================================
-# APP
+# НАСТРОЙКИ
+# ============================================================
+
+SERVICE_NAME = os.getenv(
+    "SERVICE_NAME",
+    "МАГНИТ VPN",
+).strip()
+
+PUBLIC_URL = os.getenv(
+    "PUBLIC_URL",
+    "https://magnit-grcm.onrender.com",
+).rstrip("/")
+
+TELEGRAM_USERNAME = os.getenv(
+    "TELEGRAM_USERNAME",
+    "orelvpntopbot",
+).strip().lstrip("@")
+
+PROFILE_TITLE = os.getenv(
+    "PROFILE_TITLE",
+    "𝗦𝗨𝗕 - 𝗠𝗔𝗚𝗡𝗜𝗧 𝗩𝗣𝗡 🧲",
+).strip()
+
+APP_VERSION = "magnit-2026.09.08"
+
+
+# ============================================================
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
@@ -29,13 +58,9 @@ app = FastAPI(
 )
 
 
-APP_VERSION = "magnit-2026.09.08"
-
-PUBLIC_URL = PUBLIC_URL.rstrip("/")
-TELEGRAM_USERNAME = TELEGRAM_USERNAME.lstrip("@")
-
-TELEGRAM_URL = f"https://t.me/{TELEGRAM_USERNAME}"
-
+# ============================================================
+# HEADERS
+# ============================================================
 
 NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -48,15 +73,19 @@ NO_CACHE_HEADERS = {
 # HELPERS
 # ============================================================
 
-def subscription_url(token: str):
-    return f"{PUBLIC_URL}/sub/{quote(str(token), safe='')}"
+def escape(value, default="—"):
+    if value is None:
+        return default
+
+    value = str(value).strip()
+
+    if not value:
+        return default
+
+    return html.escape(value)
 
 
-def personal_url(token: str):
-    return f"{PUBLIC_URL}/s/{quote(str(token), safe='')}"
-
-
-def parse_date(value):
+def parse_datetime(value):
     if not value:
         return None
 
@@ -77,8 +106,8 @@ def parse_date(value):
         return None
 
 
-def is_active(value):
-    dt = parse_date(value)
+def is_subscription_active(value):
+    dt = parse_datetime(value)
 
     if not dt:
         return False
@@ -86,8 +115,8 @@ def is_active(value):
     return dt > datetime.now(timezone.utc)
 
 
-def days_left(value):
-    dt = parse_date(value)
+def get_days_left(value):
+    dt = parse_datetime(value)
 
     if not dt:
         return 0
@@ -99,11 +128,11 @@ def days_left(value):
     if seconds <= 0:
         return 0
 
-    return max(1, int(seconds // 86400))
+    return max(1, int(seconds / 86400))
 
 
 def format_date(value):
-    dt = parse_date(value)
+    dt = parse_datetime(value)
 
     if not dt:
         return "—"
@@ -111,31 +140,135 @@ def format_date(value):
     return dt.strftime("%d.%m.%Y")
 
 
-def safe(value, default="—"):
-    if value is None:
-        return default
+# ============================================================
+# URL ПОДПИСКИ
+# ============================================================
 
-    value = str(value).strip()
+def build_subscription_url(token):
+    """
+    Обычная HTTPS ссылка подписки.
 
-    if not value:
-        return default
+    Например:
+    https://magnit-grcm.onrender.com/sub/ABC123
+    """
 
-    return html.escape(value)
+    return (
+        f"{PUBLIC_URL}/sub/"
+        f"{quote(str(token), safe='')}"
+    )
+
+
+def build_happ_url(token):
+    """
+    Прямая ссылка для импорта подписки в Happ.
+
+    Формат:
+
+    happ://add/https://domain/sub/token
+
+    Happ открывается и получает персональную
+    ссылку подписки.
+    """
+
+    subscription_url = build_subscription_url(token)
+
+    return (
+        "happ://add/"
+        + quote(subscription_url, safe=":/?=&")
+    )
 
 
 # ============================================================
-# MAIN WEBSITE
+# АВТОСОЗДАНИЕ ПОДПИСКИ
 # ============================================================
 
-@app.get("/", response_class=HTMLResponse)
+def ensure_user_subscription(user_id):
+    """
+    Если subscription_content уже есть —
+    просто возвращаем его.
+
+    Если нет —
+    пробуем создать через subscription.py.
+    """
+
+    try:
+        content = get_subscription_content(user_id)
+    except Exception:
+        content = ""
+
+    if content:
+        return content
+
+    # --------------------------------------------------------
+    # Пробуем использовать subscription.py
+    # --------------------------------------------------------
+
+    if ensure_subscription is not None:
+        try:
+            result = ensure_subscription(user_id)
+
+            # ensure_subscription может вернуть:
+            # строку
+            if isinstance(result, str) and result.strip():
+                content = result.strip()
+
+            # или dict
+            elif isinstance(result, dict):
+                content = (
+                    result.get("content")
+                    or result.get("subscription_content")
+                    or ""
+                )
+
+        except Exception as e:
+            print(
+                f"[WEB] ensure_subscription error "
+                f"for {user_id}: {e}"
+            )
+
+    # --------------------------------------------------------
+    # Проверяем БД ещё раз
+    # --------------------------------------------------------
+
+    if not content:
+        try:
+            content = get_subscription_content(user_id)
+        except Exception:
+            content = ""
+
+    # --------------------------------------------------------
+    # Если получили — сохраняем
+    # --------------------------------------------------------
+
+    if content:
+        try:
+            save_subscription_content(
+                user_id,
+                content,
+            )
+        except Exception as e:
+            print(
+                f"[WEB] save_subscription_content error "
+                f"for {user_id}: {e}"
+            )
+
+    return content or ""
+
+
+# ============================================================
+# ГЛАВНАЯ
+# ============================================================
+
+@app.get(
+    "/",
+    response_class=HTMLResponse,
+)
 async def index():
 
-    page = f"""
+    return f"""
 <!doctype html>
 <html lang="ru">
-
 <head>
-
 <meta charset="utf-8">
 
 <meta
@@ -146,22 +279,45 @@ async def index():
     viewport-fit=cover"
 >
 
-<meta name="theme-color" content="#07070a">
+<meta name="theme-color" content="#050505">
 
 <title>{html.escape(SERVICE_NAME)}</title>
 
 <style>
 
 * {{
-    box-sizing:border-box;
-    -webkit-tap-highlight-color:transparent;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
 }}
 
 html,
 body {{
-    margin:0;
-    padding:0;
-    min-height:100%;
+    margin: 0;
+    min-height: 100%;
+}}
+
+body {{
+    min-height: 100vh;
+
+    background:
+        radial-gradient(
+            circle at 50% -10%,
+            rgba(255,255,255,.13),
+            transparent 34%
+        ),
+        radial-gradient(
+            circle at 100% 45%,
+            rgba(255,255,255,.04),
+            transparent 30%
+        ),
+        linear-gradient(
+            180deg,
+            #090909,
+            #050505 58%,
+            #020202
+        );
+
+    color: #f5f5f7;
 
     font-family:
         -apple-system,
@@ -172,756 +328,112 @@ body {{
         Arial,
         sans-serif;
 
-    color:#fff;
-    background:#07070a;
-}}
-
-body {{
-
-    overflow-x:hidden;
-
-    background:
-        radial-gradient(
-            circle at 50% -10%,
-            rgba(255,255,255,.16),
-            transparent 34%
-        ),
-        radial-gradient(
-            circle at 0% 55%,
-            rgba(255,255,255,.06),
-            transparent 28%
-        ),
-        radial-gradient(
-            circle at 100% 70%,
-            rgba(255,255,255,.05),
-            transparent 30%
-        ),
-        linear-gradient(
-            180deg,
-            #0b0b10 0%,
-            #07070a 45%,
-            #030305 100%
-        );
-}}
-
-body::before {{
-
-    content:"";
-
-    position:fixed;
-
-    width:420px;
-    height:420px;
-
-    left:50%;
-    top:50%;
-
-    transform:
-        translate(-50%,-50%);
-
-    border-radius:50%;
-
-    background:
-        radial-gradient(
-            circle,
-            rgba(255,255,255,.045),
-            transparent 68%
-        );
-
-    filter:blur(40px);
-
-    pointer-events:none;
-}}
-
-.container {{
-
-    width:min(
-        calc(100% - 30px),
-        760px
-    );
-
-    margin:auto;
-
-    padding:
-        calc(20px + env(safe-area-inset-top))
-        0
-        calc(35px + env(safe-area-inset-bottom));
-}}
-
-.header {{
-
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-
-    padding:8px 0 20px;
-}}
-
-.brand {{
-
-    display:flex;
-    align-items:center;
-    gap:12px;
-}}
-
-.logo {{
-
-    width:46px;
-    height:46px;
-
-    border-radius:15px;
-
-    display:grid;
-    place-items:center;
-
-    background:
-        linear-gradient(
-            145deg,
-            #29292e,
-            #0d0d10
-        );
-
-    border:
-        1px solid
-        rgba(255,255,255,.12);
-
-    box-shadow:
-        0 12px 35px
-        rgba(0,0,0,.4);
-}}
-
-.logo span {{
-
-    font-size:22px;
-    font-weight:950;
-    letter-spacing:-2px;
-}}
-
-.brandName {{
-
-    font-size:20px;
-    font-weight:900;
-
-    letter-spacing:-.8px;
-}}
-
-.secure {{
-
-    font-size:9px;
-    letter-spacing:1.5px;
-    color:#777;
-    font-weight:800;
-}}
-
-.hero {{
-
-    text-align:center;
-
-    padding:
-        55px
-        0
-        35px;
-}}
-
-.badge {{
-
-    display:inline-flex;
-
-    align-items:center;
-    gap:7px;
-
-    padding:
-        8px
-        12px;
-
-    border-radius:999px;
-
-    background:
-        rgba(255,255,255,.055);
-
-    border:
-        1px solid
-        rgba(255,255,255,.08);
-
-    color:#a3a3aa;
-
-    font-size:10px;
-
-    font-weight:850;
-
-    letter-spacing:.8px;
-
-    text-transform:uppercase;
-}}
-
-.badgeDot {{
-
-    width:6px;
-    height:6px;
-
-    border-radius:50%;
-
-    background:#fff;
-
-    box-shadow:
-        0 0 14px
-        rgba(255,255,255,.9);
-}}
-
-.hero h1 {{
-
-    margin:
-        22px
-        0
-        14px;
-
-    font-size:
-        clamp(44px,10vw,78px);
-
-    line-height:.95;
-
-    letter-spacing:-5px;
-
-    font-weight:950;
-}}
-
-.hero h1 span {{
-
-    color:#8c8c93;
-}}
-
-.hero p {{
-
-    margin:0 auto;
-
-    max-width:530px;
-
-    color:#888890;
-
-    font-size:16px;
-
-    line-height:1.6;
-}}
-
-.buttons {{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(2,1fr);
-
-    gap:11px;
-
-    margin-top:28px;
-}}
-
-.button {{
-
-    min-height:56px;
-
-    display:flex;
-
-    align-items:center;
-
-    justify-content:center;
-
-    border-radius:18px;
-
-    text-decoration:none;
-
-    font-size:14px;
-
-    font-weight:900;
-
-    transition:
-        transform .18s,
-        opacity .18s;
-}}
-
-.button:active {{
-
-    transform:scale(.97);
-}}
-
-.primary {{
-
-    background:#fff;
-    color:#050507;
-
-    box-shadow:
-        0 16px 45px
-        rgba(255,255,255,.08);
-}}
-
-.secondary {{
-
-    background:
-        rgba(255,255,255,.045);
-
-    color:#fff;
-
-    border:
-        1px solid
-        rgba(255,255,255,.09);
-}}
-
-.cards {{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(3,1fr);
-
-    gap:12px;
-
-    margin-top:20px;
+    display: grid;
+    place-items: center;
 }}
 
 .card {{
+    width: min(92%, 520px);
 
-    padding:22px;
+    padding: 35px;
 
-    border-radius:24px;
+    border-radius: 28px;
 
-    background:
-        rgba(18,18,21,.72);
+    background: rgba(18,18,20,.78);
 
     border:
-        1px solid
-        rgba(255,255,255,.075);
+        1px solid rgba(255,255,255,.08);
 
     box-shadow:
-        0 18px 60px
-        rgba(0,0,0,.22);
+        0 25px 80px rgba(0,0,0,.45);
 
-    backdrop-filter:
-        blur(22px);
+    text-align: center;
+
+    backdrop-filter: blur(20px);
 }}
 
-.icon {{
+.logo {{
+    width: 76px;
+    height: 76px;
 
-    font-size:25px;
+    margin: 0 auto 20px;
 
-    margin-bottom:16px;
-}}
+    border-radius: 24px;
 
-.card h3 {{
+    display: grid;
+    place-items: center;
 
-    margin:
-        0 0 7px;
-
-    font-size:15px;
-    font-weight:900;
-}}
-
-.card p {{
-
-    margin:0;
-
-    color:#77777f;
-
-    font-size:12px;
-
-    line-height:1.5;
-}}
-
-.section {{
-
-    margin-top:15px;
-}}
-
-.sectionTitle {{
-
-    font-size:12px;
-
-    text-transform:uppercase;
-
-    letter-spacing:1.2px;
-
-    color:#66666d;
-
-    font-weight:900;
-
-    margin:
-        25px
-        5px
-        10px;
-}}
-
-.bigCard {{
-
-    padding:26px;
-
-    border-radius:27px;
+    font-size: 32px;
+    font-weight: 900;
 
     background:
         linear-gradient(
             145deg,
-            rgba(255,255,255,.075),
-            rgba(255,255,255,.025)
+            #292929,
+            #0c0c0c
         );
 
     border:
-        1px solid
-        rgba(255,255,255,.09);
-
-    box-shadow:
-        0 22px 70px
-        rgba(0,0,0,.28);
+        1px solid rgba(255,255,255,.1);
 }}
 
-.bigCard h2 {{
+h1 {{
+    margin: 0;
 
-    margin:0 0 8px;
-
-    font-size:24px;
-
-    letter-spacing:-1px;
-
-    font-weight:950;
+    font-size: 34px;
+    font-weight: 850;
 }}
 
-.bigCard p {{
-
-    margin:0;
-
-    color:#85858d;
-
-    line-height:1.55;
-
-    font-size:13px;
+p {{
+    color: #929298;
+    line-height: 1.5;
 }}
 
-.steps {{
+.button {{
+    display: block;
 
-    display:grid;
+    margin-top: 25px;
 
-    gap:10px;
+    padding: 17px 20px;
 
-    margin-top:20px;
-}}
+    border-radius: 17px;
 
-.step {{
+    background: #fff;
+    color: #000;
 
-    display:flex;
+    text-decoration: none;
 
-    gap:13px;
-
-    align-items:center;
-
-    padding:14px;
-
-    border-radius:17px;
-
-    background:
-        rgba(255,255,255,.035);
-
-    border:
-        1px solid
-        rgba(255,255,255,.05);
-}}
-
-.stepNumber {{
-
-    width:32px;
-    height:32px;
-
-    flex:0 0 32px;
-
-    display:grid;
-    place-items:center;
-
-    border-radius:11px;
-
-    background:#fff;
-    color:#000;
-
-    font-size:12px;
-    font-weight:950;
-}}
-
-.stepText b {{
-
-    display:block;
-
-    font-size:13px;
-
-    margin-bottom:3px;
-}}
-
-.stepText span {{
-
-    color:#73737a;
-
-    font-size:11px;
-}}
-
-.footer {{
-
-    text-align:center;
-
-    color:#55555b;
-
-    font-size:10px;
-
-    line-height:1.7;
-
-    padding:
-        35px
-        0
-        5px;
-}}
-
-@media(max-width:600px) {{
-
-    .cards {{
-        grid-template-columns:1fr;
-    }}
-
-    .buttons {{
-        grid-template-columns:1fr;
-    }}
-
-    .hero {{
-        padding-top:40px;
-    }}
-
-    .hero h1 {{
-        letter-spacing:-3px;
-    }}
-
+    font-weight: 800;
 }}
 
 </style>
-
 </head>
 
 <body>
 
-<div class="container">
+<div class="card">
 
-<header class="header">
+    <div class="logo">🧲</div>
 
-    <div class="brand">
-
-        <div class="logo">
-            <span>🧲</span>
-        </div>
-
-        <div class="brandName">
-            МАГНИТ VPN
-        </div>
-
-    </div>
-
-    <div class="secure">
-        SECURE ACCESS
-    </div>
-
-</header>
-
-
-<section class="hero">
-
-    <div class="badge">
-        <span class="badgeDot"></span>
-        Сервис работает
-    </div>
-
-    <h1>
-        МАГНИТ<br>
-        <span>VPN</span>
-    </h1>
+    <h1>{html.escape(SERVICE_NAME)}</h1>
 
     <p>
-        Быстрое подключение без лишних настроек.
-        Получите подписку и импортируйте её
-        прямо в VPN-клиент.
+        Быстрый и защищённый VPN
+        без лишних настроек.
     </p>
 
-    <div class="buttons">
-
-        <a
-            class="button primary"
-            href="{TELEGRAM_URL}"
-        >
-            🚀 Открыть бота
-        </a>
-
-        <a
-            class="button secondary"
-            href="{TELEGRAM_URL}"
-        >
-            💬 Поддержка
-        </a>
-
-    </div>
-
-</section>
-
-
-<div class="cards">
-
-    <div class="card">
-
-        <div class="icon">⚡</div>
-
-        <h3>
-            Быстро
-        </h3>
-
-        <p>
-            Подключение через
-            персональную подписку.
-        </p>
-
-    </div>
-
-
-    <div class="card">
-
-        <div class="icon">🔒</div>
-
-        <h3>
-            Защищённо
-        </h3>
-
-        <p>
-            Данные серверов
-            не отображаются
-            в личном кабинете.
-        </p>
-
-    </div>
-
-
-    <div class="card">
-
-        <div class="icon">📱</div>
-
-        <h3>
-            Удобно
-        </h3>
-
-        <p>
-            Подписка подходит
-            для совместимых
-            VPN-клиентов.
-        </p>
-
-    </div>
-
-</div>
-
-
-<section class="section">
-
-<div class="sectionTitle">
-    Как подключиться
-</div>
-
-<div class="bigCard">
-
-    <h2>
-        Три шага — и готово
-    </h2>
-
-    <p>
-        Управляйте подпиской через
-        Telegram-бота.
-    </p>
-
-
-    <div class="steps">
-
-        <div class="step">
-
-            <div class="stepNumber">
-                1
-            </div>
-
-            <div class="stepText">
-
-                <b>
-                    Откройте бота
-                </b>
-
-                <span>
-                    Перейдите в Telegram
-                </span>
-
-            </div>
-
-        </div>
-
-
-        <div class="step">
-
-            <div class="stepNumber">
-                2
-            </div>
-
-            <div class="stepText">
-
-                <b>
-                    Получите подписку
-                </b>
-
-                <span>
-                    Выберите подходящий тариф
-                </span>
-
-            </div>
-
-        </div>
-
-
-        <div class="step">
-
-            <div class="stepNumber">
-                3
-            </div>
-
-            <div class="stepText">
-
-                <b>
-                    Подключите VPN
-                </b>
-
-                <span>
-                    Импортируйте персональную ссылку
-                </span>
-
-            </div>
-
-        </div>
-
-    </div>
-
-</div>
-
-</section>
-
-
-<footer class="footer">
-
-    МАГНИТ VPN · {APP_VERSION}<br>
-
-    Быстро. Приватно. Без лишнего.
-
-</footer>
+    <a
+        class="button"
+        href="https://t.me/{html.escape(TELEGRAM_USERNAME)}"
+    >
+        Открыть Telegram
+    </a>
 
 </div>
 
 </body>
-
 </html>
 """
-
-    return HTMLResponse(
-        content=page,
-        headers=NO_CACHE_HEADERS,
-    )
 
 
 # ============================================================
@@ -932,7 +444,7 @@ body::before {{
 async def health():
 
     return JSONResponse(
-        {
+        content={
             "service": SERVICE_NAME,
             "status": "ok",
             "version": APP_VERSION,
@@ -942,142 +454,189 @@ async def health():
 
 
 # ============================================================
-# SUBSCRIPTION RAW ENDPOINT
+# SUBSCRIPTION
 # ============================================================
 
-@app.get("/sub/{token}")
+@app.get(
+    "/sub/{token}",
+    response_class=PlainTextResponse,
+)
 async def subscription(token: str):
 
     if not token:
         raise HTTPException(
             status_code=404,
-            detail="Not Found",
-        )
-
-    # Проверяем существование пользователя.
-    user = get_user_by_token_safe(token)
-
-    if not user:
-        raise HTTPException(
-            status_code=404,
             detail="Subscription not found",
         )
 
-    user_id = user["user_id"]
+    # --------------------------------------------------------
+    # Сначала ищем пользователя по token
+    # --------------------------------------------------------
 
-    content = get_subscription_content(user_id)
+    try:
+        user = get_user_by_token(token)
+    except Exception as e:
+        print(f"[WEB] get_user_by_token error: {e}")
+        user = None
+
+    # --------------------------------------------------------
+    # Fallback — если функция отсутствует/не сработала
+    # --------------------------------------------------------
+
+    if not user:
+
+        try:
+            # Некоторые старые БД могли хранить token
+            # иначе. Здесь просто сообщаем 404.
+            raise HTTPException(
+                status_code=404,
+                detail="Subscription not found",
+            )
+
+        except HTTPException:
+            raise
+
+    # --------------------------------------------------------
+    # Получаем user_id
+    # --------------------------------------------------------
+
+    user_id = user.get("user_id")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription user not found",
+        )
+
+    # --------------------------------------------------------
+    # ВАЖНО:
+    #
+    # если subscription_content пустой,
+    # автоматически создаём его.
+    # --------------------------------------------------------
+
+    content = ensure_user_subscription(user_id)
 
     if not content:
         raise HTTPException(
-            status_code=404,
-            detail="Subscription is empty",
+            status_code=503,
+            detail="Subscription could not be generated",
         )
 
-    # ========================================================
-    # ВАЖНО:
-    #
-    # Возвращаем ТОЛЬКО plain text.
-    #
-    # Никаких:
-    # - JSON
-    # - HTML
-    # - Markdown
-    # - crypt4
-    # - happ wrapper
-    #
-    # Это основной endpoint для VPN-клиента.
-    # ========================================================
+    # --------------------------------------------------------
+    # Возвращаем чистую подписку
+    # --------------------------------------------------------
 
-    return PlainTextResponse(
-        content=content,
-        media_type="text/plain; charset=utf-8",
-        headers={
-            **NO_CACHE_HEADERS,
-            "Content-Disposition": "inline",
-        },
+    response = PlainTextResponse(
+        content=content.strip() + "\n",
+        media_type="text/plain",
     )
 
+    for key, value in NO_CACHE_HEADERS.items():
+        response.headers[key] = value
+
+    # Чтобы Happ точно воспринимал ответ
+    response.headers["Content-Disposition"] = (
+        'inline; filename="subscription.txt"'
+    )
+
+    return response
+
 
 # ============================================================
-# SAFE USER LOOKUP
+# ЛИЧНЫЙ КАБИНЕТ
 # ============================================================
 
-def get_user_by_token_safe(token):
-    """
-    Поддерживает текущую database.py,
-    где get_user_by_token(token) возвращает dict.
-    """
+@app.get(
+    "/s/{token}",
+    response_class=HTMLResponse,
+)
+async def subscription_page(token: str):
+
+    if not token:
+        raise HTTPException(
+            status_code=404,
+            detail="Not found",
+        )
 
     try:
-        from database import get_user_by_token
-
         user = get_user_by_token(token)
-
-        if user:
-            return user
-
-    except Exception:
-        pass
-
-    return None
-
-
-# ============================================================
-# PERSONAL PAGE
-# ============================================================
-
-@app.get("/s/{token}", response_class=HTMLResponse)
-async def personal_page(token: str):
-
-    user = get_user_by_token_safe(token)
+    except Exception as e:
+        print(f"[WEB] user lookup error: {e}")
+        user = None
 
     if not user:
         raise HTTPException(
             status_code=404,
-            detail="Not Found",
+            detail="Not found",
         )
 
-    first_name = safe(
+    user_id = user.get("user_id")
+
+    first_name = (
         user.get("first_name")
         or user.get("username")
         or "Пользователь"
     )
 
-    tariff = safe(
-        user.get("subscription"),
-        "Нет тарифа",
+    subscription = (
+        user.get("subscription")
+        or "Не выбран"
     )
 
-    until = user.get(
-        "subscription_until",
-        "",
+    subscription_until = (
+        user.get("subscription_until")
+        or ""
     )
 
-    active = is_active(until)
+    active = is_subscription_active(
+        subscription_until
+    )
 
-    remaining = days_left(until)
+    days = get_days_left(
+        subscription_until
+    )
 
-    expiry = format_date(until)
+    subscription_url = build_subscription_url(
+        token
+    )
 
-    sub_url = subscription_url(token)
+    happ_url = build_happ_url(
+        token
+    )
 
-    if active:
+    status = (
+        "Активна"
+        if active
+        else "Неактивна"
+    )
 
-        status = "АКТИВНА"
-        status_class = "active"
+    status_class = (
+        "active"
+        if active
+        else "inactive"
+    )
 
-        days_text = (
-            f"{remaining} "
-            f"{'день' if remaining == 1 else 'дней'}"
+    days_text = (
+        f"{days} дн."
+        if active
+        else "Завершена"
+    )
+
+    # --------------------------------------------------------
+    # Пытаемся создать подписку заранее
+    # --------------------------------------------------------
+
+    try:
+        ensure_user_subscription(user_id)
+    except Exception as e:
+        print(
+            f"[WEB] pre-generate error: {e}"
         )
 
-    else:
-
-        status = "НЕАКТИВНА"
-        status_class = "inactive"
-
-        days_text = "Завершена"
-
+    # --------------------------------------------------------
+    # HTML
+    # --------------------------------------------------------
 
     page = f"""
 <!doctype html>
@@ -1098,49 +657,66 @@ async def personal_page(token: str):
 
 <meta
     name="theme-color"
-    content="#07070a"
+    content="#050505"
+>
+
+<meta
+    name="apple-mobile-web-app-capable"
+    content="yes"
 >
 
 <title>
-    МАГНИТ VPN — Подписка
+    {html.escape(SERVICE_NAME)}
+    — Личный кабинет
 </title>
 
 <style>
 
 * {{
-    box-sizing:border-box;
-    -webkit-tap-highlight-color:transparent;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
 }}
 
 html,
 body {{
-    margin:0;
-    min-height:100%;
+    margin: 0;
+    min-height: 100%;
+}}
+
+body {{
+
+    min-height: 100vh;
+
+    color: #f5f5f7;
 
     font-family:
         -apple-system,
         BlinkMacSystemFont,
         "SF Pro Display",
+        "SF Pro Text",
         Inter,
         Arial,
         sans-serif;
 
-    background:#07070a;
-    color:#fff;
-}}
-
-body {{
-
     background:
+
         radial-gradient(
             circle at 50% -10%,
-            rgba(255,255,255,.15),
-            transparent 35%
+            rgba(255,255,255,.13),
+            transparent 34%
         ),
+
+        radial-gradient(
+            circle at 100% 45%,
+            rgba(255,255,255,.04),
+            transparent 30%
+        ),
+
         linear-gradient(
             180deg,
-            #0b0b0f,
-            #050507
+            #090909,
+            #050505 58%,
+            #020202
         );
 }}
 
@@ -1148,11 +724,11 @@ body {{
 
     width:
         min(
-            calc(100% - 30px),
+            calc(100% - 32px),
             620px
         );
 
-    margin:auto;
+    margin: auto;
 
     padding:
         calc(20px + env(safe-area-inset-top))
@@ -1162,402 +738,306 @@ body {{
 
 .header {{
 
-    display:flex;
+    display: flex;
+    align-items: center;
 
-    justify-content:space-between;
+    gap: 12px;
 
-    align-items:center;
-
-    margin-bottom:25px;
-}}
-
-.brand {{
-
-    display:flex;
-
-    align-items:center;
-
-    gap:10px;
+    margin-bottom: 22px;
 }}
 
 .logo {{
 
-    width:43px;
-    height:43px;
+    width: 48px;
+    height: 48px;
 
-    border-radius:14px;
+    border-radius: 15px;
 
-    display:grid;
-    place-items:center;
+    display: grid;
+    place-items: center;
+
+    font-size: 22px;
 
     background:
         linear-gradient(
             145deg,
-            #29292e,
-            #0d0d10
+            #292929,
+            #0c0c0c
         );
 
     border:
-        1px solid
-        rgba(255,255,255,.1);
+        1px solid rgba(255,255,255,.1);
+
+    box-shadow:
+        0 14px 35px rgba(0,0,0,.35);
 }}
 
-.brand b {{
+.brand h1 {{
 
-    font-size:18px;
-    font-weight:950;
+    margin: 0;
+
+    font-size: 20px;
+    font-weight: 850;
 }}
 
-.hero {{
+.brand p {{
 
-    text-align:center;
+    margin: 3px 0 0;
 
-    padding:
-        25px
-        0
-        20px;
-}}
+    color: #85858c;
 
-.hero .small {{
-
-    color:#77777f;
-
-    font-size:12px;
-
-    margin-bottom:8px;
-}}
-
-.hero h1 {{
-
-    margin:0;
-
-    font-size:42px;
-
-    letter-spacing:-2.5px;
-
-    font-weight:950;
-}}
-
-.hero p {{
-
-    margin:
-        10px
-        0
-        0;
-
-    color:#818189;
-
-    font-size:14px;
+    font-size: 13px;
 }}
 
 .card {{
 
-    margin-top:12px;
+    margin-top: 14px;
 
-    padding:22px;
+    padding: 20px;
 
-    border-radius:25px;
+    border-radius: 23px;
 
     background:
-        rgba(18,18,21,.76);
+        rgba(18,18,20,.76);
 
     border:
-        1px solid
-        rgba(255,255,255,.08);
+        1px solid rgba(255,255,255,.08);
 
     box-shadow:
-        0 20px 65px
-        rgba(0,0,0,.28);
+        0 18px 50px rgba(0,0,0,.25);
 
-    backdrop-filter:blur(25px);
-}}
-
-.statusRow {{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    align-items:center;
-
-    gap:10px;
+    backdrop-filter: blur(20px);
 }}
 
 .label {{
 
-    color:#6f6f76;
+    color: #85858c;
 
-    font-size:10px;
+    font-size: 13px;
 
-    text-transform:uppercase;
+    margin-bottom: 7px;
+}}
 
-    letter-spacing:1px;
+.value {{
 
-    font-weight:900;
+    font-size: 20px;
+
+    font-weight: 800;
 }}
 
 .status {{
 
+    display: inline-flex;
+
+    align-items: center;
+
+    gap: 7px;
+
     padding:
         8px
-        11px;
+        12px;
 
-    border-radius:999px;
+    border-radius: 999px;
 
-    background:
-        rgba(255,255,255,.055);
+    font-size: 13px;
 
-    font-size:11px;
-
-    font-weight:900;
+    font-weight: 750;
 }}
 
 .status.active {{
 
-    box-shadow:
-        0 0 20px
-        rgba(255,255,255,.06);
-}}
-
-.big {{
-
-    margin-top:20px;
-
-    font-size:34px;
-
-    font-weight:950;
-
-    letter-spacing:-1.5px;
-}}
-
-.grid {{
-
-    display:grid;
-
-    grid-template-columns:
-        1fr 1fr;
-
-    gap:10px;
-
-    margin-top:18px;
-}}
-
-.stat {{
-
-    padding:15px;
-
-    border-radius:17px;
+    color: #d9ffd9;
 
     background:
-        rgba(255,255,255,.035);
+        rgba(60,190,80,.13);
 
     border:
-        1px solid
-        rgba(255,255,255,.05);
+        1px solid rgba(60,190,80,.18);
 }}
 
-.stat span {{
+.status.inactive {{
 
-    display:block;
+    color: #ffdede;
 
-    color:#68686f;
+    background:
+        rgba(255,70,70,.13);
 
-    font-size:9px;
-
-    text-transform:uppercase;
-
-    letter-spacing:.8px;
-
-    margin-bottom:7px;
+    border:
+        1px solid rgba(255,70,70,.18);
 }}
 
-.stat b {{
+.dot {{
 
-    font-size:15px;
+    width: 7px;
+    height: 7px;
 
-    font-weight:900;
+    border-radius: 50%;
+
+    background: currentColor;
 }}
 
 .primary {{
 
-    width:100%;
+    display: block;
 
-    min-height:55px;
+    width: 100%;
 
-    display:flex;
+    padding: 17px 18px;
 
-    align-items:center;
+    margin-top: 15px;
 
-    justify-content:center;
+    border-radius: 17px;
 
-    margin-top:17px;
+    text-align: center;
 
-    border-radius:17px;
+    text-decoration: none;
 
-    background:#fff;
+    font-weight: 850;
 
-    color:#050507;
+    color: #000;
 
-    text-decoration:none;
-
-    font-size:14px;
-
-    font-weight:950;
+    background: #fff;
 
     box-shadow:
-        0 15px 40px
-        rgba(255,255,255,.08);
+        0 12px 35px rgba(0,0,0,.3);
 }}
 
-.actions {{
-
-    display:grid;
-
-    grid-template-columns:
-        1fr 1fr;
-
-    gap:9px;
-
-    margin-top:9px;
+.primary:active {{
+    transform: scale(.985);
 }}
 
-.action {{
+.secondary {{
 
-    min-height:49px;
+    width: 100%;
 
-    display:flex;
+    padding: 15px 18px;
 
-    align-items:center;
+    margin-top: 10px;
 
-    justify-content:center;
+    border-radius: 17px;
 
-    border-radius:16px;
+    border:
+        1px solid rgba(255,255,255,.09);
 
     background:
-        rgba(255,255,255,.045);
+        rgba(255,255,255,.05);
 
-    color:#fff;
+    color: #fff;
 
-    border:
-        1px solid
-        rgba(255,255,255,.08);
+    font-size: 15px;
 
-    text-decoration:none;
-
-    font-size:12px;
-
-    font-weight:900;
+    font-weight: 750;
 }}
 
-.url {{
+.urlbox {{
 
-    margin-top:13px;
+    display: flex;
 
-    display:flex;
+    gap: 8px;
 
-    align-items:center;
-
-    gap:7px;
-
-    padding:6px;
-
-    border-radius:16px;
-
-    background:#09090b;
-
-    border:
-        1px solid
-        rgba(255,255,255,.07);
+    margin-top: 12px;
 }}
 
-.url input {{
+.urlbox input {{
 
-    min-width:0;
+    min-width: 0;
+    flex: 1;
 
-    flex:1;
+    height: 48px;
 
-    border:0;
+    padding: 0 12px;
 
-    outline:0;
+    border-radius: 13px;
 
-    background:transparent;
+    border:
+        1px solid rgba(255,255,255,.08);
 
-    color:#74747b;
+    background:
+        rgba(255,255,255,.04);
 
-    font-size:10px;
+    color: #aaa;
 
-    padding:9px;
+    font-size: 12px;
 }}
 
 .copy {{
 
-    border:0;
+    height: 48px;
 
-    border-radius:11px;
+    padding: 0 14px;
 
-    padding:
-        10px
-        12px;
+    border: 0;
 
-    background:#fff;
+    border-radius: 13px;
 
-    color:#000;
+    background: #fff;
 
-    font-size:9px;
+    color: #000;
 
-    font-weight:950;
+    font-weight: 850;
 }}
 
 .notice {{
 
-    margin-top:13px;
+    display: flex;
 
-    padding:14px;
+    gap: 11px;
 
-    border-radius:17px;
+    margin-top: 15px;
+
+    padding: 14px;
+
+    border-radius: 16px;
 
     background:
         rgba(255,255,255,.035);
 
     border:
-        1px solid
-        rgba(255,255,255,.05);
+        1px solid rgba(255,255,255,.06);
+}}
 
-    color:#77777e;
+.check {{
 
-    font-size:11px;
+    width: 28px;
+    height: 28px;
 
-    line-height:1.5;
+    flex: 0 0 28px;
+
+    display: grid;
+    place-items: center;
+
+    border-radius: 50%;
+
+    background:
+        rgba(255,255,255,.08);
 }}
 
 .notice b {{
+    font-size: 13px;
+}}
 
-    color:#aaaab0;
+.notice p {{
+
+    margin: 4px 0 0;
+
+    color: #818188;
+
+    font-size: 12px;
+
+    line-height: 1.4;
 }}
 
 .footer {{
 
-    text-align:center;
+    margin-top: 22px;
 
-    color:#55555b;
+    text-align: center;
 
-    font-size:10px;
+    color: #606066;
 
-    line-height:1.6;
+    font-size: 11px;
 
-    padding:28px 0 4px;
-}}
-
-@media(max-width:430px) {{
-
-    .hero h1 {{
-        font-size:37px;
-    }}
-
-    .big {{
-        font-size:29px;
-    }}
-
+    line-height: 1.5;
 }}
 
 </style>
@@ -1568,190 +1048,222 @@ body {{
 
 <div class="container">
 
-<header class="header">
-
-    <div class="brand">
+    <div class="header">
 
         <div class="logo">
             🧲
         </div>
 
-        <b>
-            МАГНИТ VPN
-        </b>
+        <div class="brand">
+
+            <h1>
+                {html.escape(SERVICE_NAME)}
+            </h1>
+
+            <p>
+                Личный кабинет
+            </p>
+
+        </div>
 
     </div>
 
-</header>
 
-
-<section class="hero">
-
-    <div class="small">
-        ЛИЧНЫЙ КАБИНЕТ
-    </div>
-
-    <h1>
-        Привет, {first_name}
-    </h1>
-
-    <p>
-        Ваша персональная подписка
-    </p>
-
-</section>
-
-
-<section class="card">
-
-    <div class="statusRow">
+    <section class="card">
 
         <div class="label">
-            Состояние подписки
+            Пользователь
         </div>
 
-        <div class="status {status_class}">
+        <div class="value">
+            {escape(first_name, "Пользователь")}
+        </div>
+
+    </section>
+
+
+    <section class="card">
+
+        <div class="label">
+            Статус подписки
+        </div>
+
+        <div
+            class="status {status_class}"
+        >
+
+            <span class="dot"></span>
+
             {status}
-        </div>
-
-    </div>
-
-
-    <div class="big">
-        {days_text}
-    </div>
-
-
-    <div class="grid">
-
-        <div class="stat">
-
-            <span>
-                Тариф
-            </span>
-
-            <b>
-                {tariff}
-            </b>
 
         </div>
 
+        <div
+            style="
+                margin-top:16px;
+                display:flex;
+                justify-content:space-between;
+                gap:20px;
+            "
+        >
 
-        <div class="stat">
+            <div>
 
-            <span>
+                <div class="label">
+                    Тариф
+                </div>
+
+                <div class="value">
+                    {escape(subscription)}
+                </div>
+
+            </div>
+
+
+            <div style="text-align:right">
+
+                <div class="label">
+                    Осталось
+                </div>
+
+                <div class="value">
+                    {days_text}
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div
+            style="
+                margin-top:18px;
+                padding-top:15px;
+                border-top:
+                    1px solid
+                    rgba(255,255,255,.07);
+            "
+        >
+
+            <div class="label">
                 Действует до
-            </span>
+            </div>
 
-            <b>
-                {expiry}
-            </b>
+            <div class="value">
+                {format_date(subscription_until)}
+            </div>
 
         </div>
 
-    </div>
-
-</section>
+    </section>
 
 
-<section class="card">
+    <section class="card">
 
-    <div class="label">
-        ПОДКЛЮЧЕНИЕ
-    </div>
+        <div class="label">
+            Подключение
+        </div>
 
-    <div
-        style="
-        font-size:20px;
-        font-weight:950;
-        margin-top:8px;
-        "
-    >
-        Подключить VPN
-    </div>
-
-    <div
-        style="
-        color:#77777f;
-        font-size:12px;
-        line-height:1.5;
-        margin-top:5px;
-        "
-    >
-        Используйте персональную
-        ссылку подписки в вашем VPN-клиенте.
-    </div>
-
-
-    <a
-        class="primary"
-        href="{sub_url}"
-    >
-        🔗 Открыть подписку
-    </a>
-
-
-    <div class="actions">
+        <div class="value">
+            Happ VPN
+        </div>
 
         <a
-            class="action"
-            href="{TELEGRAM_URL}"
+            class="primary"
+            href="{html.escape(happ_url, quote=True)}"
         >
-            💬 Поддержка
+            🧲 Подключить через Happ
         </a>
 
         <button
-            class="action"
+            class="secondary"
             onclick="copySubscription()"
         >
-            📋 Скопировать
+            📋 Скопировать ссылку
         </button>
 
-    </div>
+    </section>
 
 
-    <div class="url">
+    <section class="card">
 
-        <input
-            id="subUrl"
-            readonly
-            value="{html.escape(sub_url, quote=True)}"
+        <div class="label">
+            Моя подписка
+        </div>
+
+        <div class="urlbox">
+
+            <input
+                id="subUrl"
+                readonly
+                value="{html.escape(subscription_url, quote=True)}"
+            >
+
+            <button
+                class="copy"
+                onclick="copySubscription()"
+            >
+                COPY
+            </button>
+
+        </div>
+
+
+        <div class="notice">
+
+            <div class="check">
+                ✓
+            </div>
+
+            <div>
+
+                <b>
+                    Серверные параметры скрыты
+                </b>
+
+                <p>
+                    IP, порты, UUID, Reality
+                    и другие технические данные
+                    не отображаются на странице.
+                </p>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <section class="card">
+
+        <div class="label">
+            Поддержка
+        </div>
+
+        <div class="value">
+            Нужна помощь?
+        </div>
+
+        <a
+            class="primary"
+            href="https://t.me/{html.escape(TELEGRAM_USERNAME)}"
         >
+            💬 Открыть поддержку
+        </a>
 
-        <button
-            class="copy"
-            onclick="copySubscription()"
-        >
-            COPY
-        </button>
-
-    </div>
+    </section>
 
 
-    <div class="notice">
+    <div class="footer">
 
-        <b>
-            🔒 Данные серверов скрыты
-        </b>
+        {html.escape(SERVICE_NAME)}
+        · {APP_VERSION}
 
         <br>
 
-        IP-адреса, порты, UUID и
-        технические параметры серверов
-        не отображаются на странице.
+        Быстро. Приватно. Без лишнего.
 
     </div>
-
-</section>
-
-
-<footer class="footer">
-
-    МАГНИТ VPN · {APP_VERSION}<br>
-
-    Быстро. Приватно. Без лишнего.
-
-</footer>
 
 </div>
 
@@ -1759,25 +1271,36 @@ body {{
 <script>
 
 const SUB_URL =
-    {sub_url!r};
+    {subscription_url!r};
 
 
 async function copySubscription() {{
 
     try {{
 
-        await navigator.clipboard
-            .writeText(SUB_URL);
+        await navigator.clipboard.writeText(
+            SUB_URL
+        );
 
-    }} catch(e) {{
+        alert(
+            "Ссылка скопирована"
+        );
+
+    }} catch (e) {{
 
         const textarea =
-            document.createElement("textarea");
+            document.createElement(
+                "textarea"
+            );
 
-        textarea.value = SUB_URL;
+        textarea.value =
+            SUB_URL;
 
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
+        textarea.style.position =
+            "fixed";
+
+        textarea.style.opacity =
+            "0";
 
         document.body.appendChild(
             textarea
@@ -1785,14 +1308,16 @@ async function copySubscription() {{
 
         textarea.select();
 
-        document.execCommand("copy");
+        document.execCommand(
+            "copy"
+        );
 
         textarea.remove();
-    }}
 
-    alert(
-        "Ссылка подписки скопирована"
-    );
+        alert(
+            "Ссылка скопирована"
+        );
+    }}
 }}
 
 </script>
@@ -1802,14 +1327,31 @@ async function copySubscription() {{
 </html>
 """
 
-    return HTMLResponse(
+    response = HTMLResponse(
         content=page,
         headers=NO_CACHE_HEADERS,
     )
 
+    return response
+
 
 # ============================================================
-# RUN
+# 404
+# ============================================================
+
+@app.exception_handler(404)
+async def not_found(request, exc):
+
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": "Not found"
+        },
+    )
+
+
+# ============================================================
+# START
 # ============================================================
 
 if __name__ == "__main__":
@@ -1824,7 +1366,7 @@ if __name__ == "__main__":
     )
 
     uvicorn.run(
-        "web:app",
+        app,
         host="0.0.0.0",
         port=port,
     )
