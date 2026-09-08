@@ -1,27 +1,23 @@
 # bot.py
-# ============================================================
-# МАГНИТ VPN — MAIN BOT
-# ============================================================
 
 import asyncio
-import os
-import threading
 import logging
+import os
+from datetime import datetime, timezone
 from html import escape
 
-import uvicorn
-
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message,
     CallbackQuery,
-    LabeledPrice,
-    PreCheckoutQuery,
-    InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    LabeledPrice,
 )
 
 from config import (
@@ -38,23 +34,21 @@ from database import (
     init_db,
     create_user,
     get_user,
+    get_user_by_token,
     extend_subscription,
     use_trial,
     use_promo,
     create_payment,
-    complete_payment,
     expire_old_subscriptions,
+    get_promo,
     format_date,
 )
 
 from subscription import (
     ensure_subscription,
     start_auto_sync,
+    github_raw_url,
 )
-
-from web import app
-
-from admin import router as admin_router
 
 
 # ============================================================
@@ -63,10 +57,16 @@ from admin import router as admin_router
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format=(
+        "%(asctime)s | "
+        "%(levelname)s | "
+        "%(message)s"
+    ),
 )
 
-logger = logging.getLogger("magnit-vpn")
+logger = logging.getLogger(
+    "magnit-bot"
+)
 
 
 # ============================================================
@@ -75,90 +75,217 @@ logger = logging.getLogger("magnit-vpn")
 
 if not BOT_TOKEN:
     raise RuntimeError(
-        "BOT_TOKEN не найден в .env"
+        "BOT_TOKEN не указан в переменных окружения"
     )
-
 
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML,
+        parse_mode=ParseMode.HTML
     ),
 )
 
 dp = Dispatcher()
+router = Router()
+
+
+# ============================================================
+# STATES
+# ============================================================
+
+class PromoState(StatesGroup):
+    waiting_code = State()
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-def subscription_link(user: dict) -> str:
-    token = user.get("token", "")
-
-    return (
-        f"{PUBLIC_URL.rstrip('/')}/sub/{token}"
-    )
+def is_admin(user_id: int) -> bool:
+    return int(user_id) in ADMIN_IDS
 
 
-def personal_page(user: dict) -> str:
-    token = user.get("token", "")
-
-    return (
-        f"{PUBLIC_URL.rstrip('/')}/s/{token}"
-    )
-
-
-def is_active(user: dict) -> bool:
-    if not user:
-        return False
-
-    if user.get("blocked"):
-        return False
-
-    until = user.get("subscription_until")
-
-    if not until:
-        return False
-
+def get_raw_link(user_id: int) -> str:
+    """
+    Возвращает постоянную RAW-ссылку пользователя.
+    """
     try:
-        from database import parse_datetime
-        from datetime import datetime, timezone
+        user = get_user(user_id)
 
-        dt = parse_datetime(until)
+        if user:
+            saved = (
+                user.get(
+                    "subscription_link",
+                    "",
+                )
+                or ""
+            ).strip()
 
-        if not dt:
-            return False
+            if saved:
+                return saved
 
-        return dt > datetime.now(timezone.utc)
+    except Exception as exc:
+        logger.error(
+            "get_raw_link error: %s",
+            exc,
+        )
 
-    except Exception:
-        return False
+    return github_raw_url(
+        user_id
+    )
 
 
-def is_blocked(user_id: int) -> bool:
+def get_cabinet_link(user_id: int) -> str:
     user = get_user(user_id)
 
-    return bool(
-        user and user.get("blocked")
+    if not user:
+        return (
+            f"{PUBLIC_URL}"
+        )
+
+    token = (
+        user.get(
+            "token",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not token:
+        return (
+            f"{PUBLIC_URL}"
+        )
+
+    return (
+        f"{PUBLIC_URL}/s/{token}"
     )
 
 
-def tariff_by_days(days: int):
-    for key, tariff in TARIFFS.items():
-        if tariff["days"] == days:
-            return key, tariff
+def subscription_status(user) -> str:
 
-    return None, None
+    if not user:
+        return "⚪ Не активна"
+
+    if int(
+        user.get(
+            "blocked",
+            0,
+        )
+        or 0
+    ):
+        return "🔴 Заблокирована"
+
+    until = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not until:
+        return "⚪ Не активна"
+
+    try:
+
+        expire = datetime.fromisoformat(
+            until.replace(
+                "Z",
+                "+00:00",
+            )
+        )
+
+        if expire.tzinfo is None:
+            expire = expire.replace(
+                tzinfo=timezone.utc
+            )
+
+        if expire > datetime.now(
+            timezone.utc
+        ):
+            return "🟢 Активна"
+
+    except Exception:
+        pass
+
+    return "⚪ Не активна"
+
+
+def cabinet_text(user_id: int) -> str:
+
+    user = get_user(
+        user_id
+    )
+
+    if not user:
+        return (
+            "❌ Пользователь не найден."
+        )
+
+    status = subscription_status(
+        user
+    )
+
+    subscription = (
+        user.get(
+            "subscription",
+            "none",
+        )
+        or "none"
+    )
+
+    until = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        or ""
+    )
+
+    if until:
+        try:
+            until_text = format_date(
+                until
+            )
+        except Exception:
+            until_text = until
+    else:
+        until_text = "—"
+
+    raw = get_raw_link(
+        user_id
+    )
+
+    cabinet = get_cabinet_link(
+        user_id
+    )
+
+    return (
+        f"🧲 <b>{escape(SERVICE_NAME)}</b>\n\n"
+
+        f"👤 <b>Личный кабинет</b>\n\n"
+
+        f"Статус: {status}\n"
+        f"Тариф: <b>{escape(str(subscription))}</b>\n"
+        f"До: <b>{escape(str(until_text))}</b>\n\n"
+
+        f"🔗 <b>Подписка</b>\n"
+        f"<code>{escape(raw)}</code>\n\n"
+
+        f"🌐 <b>Кабинет:</b>\n"
+        f"<code>{escape(cabinet)}</code>"
+    )
 
 
 # ============================================================
-# USER KEYBOARD
+# KEYBOARDS
 # ============================================================
 
-def main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def main_menu(
+    user_id: int,
+) -> InlineKeyboardMarkup:
 
-    rows = [
+    buttons = [
         [
             InlineKeyboardButton(
                 text="👤 Личный кабинет",
@@ -169,30 +296,26 @@ def main_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="💳 Купить подписку",
                 callback_data="user:buy",
-            )
-        ],
-        [
+            ),
             InlineKeyboardButton(
                 text="🎁 Пробный период",
                 callback_data="user:trial",
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
                 text="🎟 Промокод",
                 callback_data="user:promo",
-            )
-        ],
-        [
+            ),
             InlineKeyboardButton(
                 text="🆘 Поддержка",
                 callback_data="user:support",
-            )
+            ),
         ],
     ]
 
-    if user_id in ADMIN_IDS:
-        rows.append(
+    if is_admin(user_id):
+        buttons.append(
             [
                 InlineKeyboardButton(
                     text="⚙️ Админ-панель",
@@ -202,234 +325,40 @@ def main_keyboard(user_id: int) -> InlineKeyboardMarkup:
         )
 
     return InlineKeyboardMarkup(
-        inline_keyboard=rows
+        inline_keyboard=buttons
     )
 
 
-def back_to_menu_keyboard(
+def cabinet_keyboard(
     user_id: int,
 ) -> InlineKeyboardMarkup:
 
-    rows = [
-        [
-            InlineKeyboardButton(
-                text="⬅️ Главное меню",
-                callback_data="user:menu",
-            )
-        ]
-    ]
-
-    if user_id in ADMIN_IDS:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="⚙️ Админ-панель",
-                    callback_data="admin:menu",
-                )
-            ]
-        )
+    raw = get_raw_link(
+        user_id
+    )
 
     return InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
-
-
-# ============================================================
-# START
-# ============================================================
-
-@dp.message(CommandStart())
-async def start_handler(
-    message: Message,
-):
-
-    user_id = message.from_user.id
-
-    if is_blocked(user_id):
-        await message.answer(
-            "🚫 <b>Доступ заблокирован.</b>\n\n"
-            "Обратитесь в поддержку.",
-        )
-        return
-
-    user = create_user(
-        user_id=user_id,
-        username=message.from_user.username or "",
-        first_name=message.from_user.first_name or "",
-    )
-
-    # Всегда гарантируем наличие ссылки.
-    try:
-        ensure_subscription(user_id)
-        user = get_user(user_id) or user
-    except Exception as e:
-        logger.exception(
-            "Ошибка создания подписки: %s",
-            e,
-        )
-
-    await message.answer(
-        f"🧲 <b>{SERVICE_NAME}</b>\n\n"
-        f"Добро пожаловать, "
-        f"<b>{escape(message.from_user.first_name or 'пользователь')}</b>!\n\n"
-        f"Здесь можно управлять подпиской, "
-        f"купить тариф или активировать пробный период.",
-        reply_markup=main_keyboard(user_id),
-    )
-
-
-# ============================================================
-# MAIN MENU
-# ============================================================
-
-@dp.callback_query(
-    F.data == "user:menu"
-)
-async def user_menu(
-    callback: CallbackQuery,
-):
-
-    if is_blocked(callback.from_user.id):
-
-        await callback.answer(
-            "Доступ заблокирован",
-            show_alert=True,
-        )
-
-        return
-
-    await callback.message.edit_text(
-        f"🧲 <b>{SERVICE_NAME}</b>\n\n"
-        f"Выберите действие:",
-        reply_markup=main_keyboard(
-            callback.from_user.id
-        ),
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# CABINET
-# ============================================================
-
-@dp.callback_query(
-    F.data == "user:cabinet"
-)
-async def cabinet(
-    callback: CallbackQuery,
-):
-
-    user_id = callback.from_user.id
-
-    if is_blocked(user_id):
-
-        await callback.answer(
-            "Доступ заблокирован",
-            show_alert=True,
-        )
-
-        return
-
-    user = get_user(user_id)
-
-    if not user:
-        user = create_user(
-            user_id,
-            callback.from_user.username or "",
-            callback.from_user.first_name or "",
-        )
-
-    try:
-        ensure_subscription(user_id)
-        user = get_user(user_id) or user
-    except Exception:
-        pass
-
-    active = is_active(user)
-
-    if active:
-        status = "🟢 Активна"
-    else:
-        status = "🔴 Неактивна"
-
-    until = user.get(
-        "subscription_until"
-    )
-
-    if until:
-        try:
-            expires = format_date(until)
-        except Exception:
-            expires = str(until)
-    else:
-        expires = "—"
-
-    tariff = (
-        user.get("subscription")
-        or "Нет"
-    )
-
-    link = subscription_link(user)
-    page = personal_page(user)
-
-    text = (
-        f"👤 <b>ЛИЧНЫЙ КАБИНЕТ</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n\n"
-        f"📦 Тариф: <b>{escape(str(tariff))}</b>\n"
-        f"📊 Статус: <b>{status}</b>\n"
-        f"📅 Действует до: <b>{expires}</b>\n\n"
-        f"🔗 <b>Ссылка подписки:</b>\n"
-        f"<code>{escape(link)}</code>"
-    )
-
-    keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="📋 Скопировать ссылку",
-                    copy_text=None,
+                    copy_text={
+                        "text": raw
+                    },
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🚀 Открыть подписку",
-                    url=page,
+                    text="🌐 Открыть кабинет",
+                    url=get_cabinet_link(
+                        user_id
+                    ),
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="💳 Купить / продлить",
-                    callback_data="user:buy",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="user:menu",
-                )
-            ],
-        ]
-    )
-
-    # Telegram Bot API не позволяет обычной
-    # InlineKeyboardButton копировать произвольный текст
-    # во всех версиях aiogram одинаково.
-    # Поэтому используем отдельную кнопку-ссылку
-    # на персональную страницу.
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🚀 Открыть личную страницу",
-                    url=page,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💳 Купить / продлить",
-                    callback_data="user:buy",
+                    text="🧲 Открыть подписку",
+                    url=raw,
                 )
             ],
             [
@@ -441,57 +370,32 @@ async def cabinet(
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard,
-    )
 
-    await callback.answer()
+def buy_keyboard() -> InlineKeyboardMarkup:
 
-
-# ============================================================
-# BUY MENU
-# ============================================================
-
-@dp.callback_query(
-    F.data == "user:buy"
-)
-async def buy_menu(
-    callback: CallbackQuery,
-):
-
-    if is_blocked(callback.from_user.id):
-
-        await callback.answer(
-            "Доступ заблокирован",
-            show_alert=True,
-        )
-
-        return
-
-    keyboard = InlineKeyboardMarkup(
+    return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="1 месяц — ⭐70",
+                    text="1 месяц — ⭐ 70",
                     callback_data="buy:1_month",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="3 месяца — ⭐190",
+                    text="3 месяца — ⭐ 190",
                     callback_data="buy:3_months",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="6 месяцев — ⭐350",
+                    text="6 месяцев — ⭐ 350",
                     callback_data="buy:6_months",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="12 месяцев — ⭐700",
+                    text="12 месяцев — ⭐ 700",
                     callback_data="buy:12_months",
                 )
             ],
@@ -504,38 +408,201 @@ async def buy_menu(
         ]
     )
 
-    await callback.message.edit_text(
-        "💳 <b>ПОДПИСКА</b>\n\n"
-        "Выберите тариф:\n\n"
-        "⭐ Оплата производится "
-        "через Telegram Stars.",
-        reply_markup=keyboard,
+
+def payment_keyboard(
+    payment_id: int,
+) -> InlineKeyboardMarkup:
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⭐ Оплатить",
+                    callback_data=(
+                        f"pay:{payment_id}"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="user:buy",
+                )
+            ],
+        ]
     )
 
-    await callback.answer()
-
 
 # ============================================================
-# CREATE INVOICE
+# START
 # ============================================================
 
-@dp.callback_query(
-    F.data.startswith("buy:")
+@router.message(
+    CommandStart()
 )
-async def buy_tariff(
+async def cmd_start(
+    message: Message,
+):
+
+    user_id = int(
+        message.from_user.id
+    )
+
+    username = (
+        message.from_user.username
+        or ""
+    )
+
+    first_name = (
+        message.from_user.first_name
+        or "Пользователь"
+    )
+
+    try:
+
+        create_user(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+        )
+
+    except TypeError:
+        try:
+            create_user(
+                user_id,
+                username,
+                first_name,
+            )
+        except Exception as exc:
+            logger.error(
+                "create_user error: %s",
+                exc,
+            )
+
+    except Exception as exc:
+        logger.error(
+            "create_user error: %s",
+            exc,
+        )
+
+    try:
+        ensure_subscription(
+            user_id
+        )
+    except Exception as exc:
+        logger.error(
+            "ensure_subscription error: %s",
+            exc,
+        )
+
+    await message.answer(
+        f"🧲 <b>{escape(SERVICE_NAME)}</b>\n\n"
+        f"Привет, "
+        f"<b>{escape(first_name)}</b>!\n\n"
+        f"Здесь ты можешь управлять "
+        f"своей VPN-подпиской.\n\n"
+        f"Выбери нужный раздел ниже 👇",
+        reply_markup=main_menu(
+            user_id
+        ),
+    )
+
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+@router.callback_query(
+    F.data == "user:menu"
+)
+async def user_menu(
     callback: CallbackQuery,
 ):
 
-    user_id = callback.from_user.id
+    await callback.answer()
 
-    if is_blocked(user_id):
+    user_id = int(
+        callback.from_user.id
+    )
 
-        await callback.answer(
-            "Доступ заблокирован",
-            show_alert=True,
+    await callback.message.edit_text(
+        f"🧲 <b>{escape(SERVICE_NAME)}</b>\n\n"
+        f"Главное меню 👇",
+        reply_markup=main_menu(
+            user_id
+        ),
+    )
+
+
+# ============================================================
+# CABINET
+# ============================================================
+
+@router.callback_query(
+    F.data == "user:cabinet"
+)
+async def user_cabinet(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    user_id = int(
+        callback.from_user.id
+    )
+
+    try:
+        ensure_subscription(
+            user_id
+        )
+    except Exception as exc:
+        logger.error(
+            "cabinet sync error: %s",
+            exc,
         )
 
-        return
+    await callback.message.edit_text(
+        cabinet_text(
+            user_id
+        ),
+        reply_markup=cabinet_keyboard(
+            user_id
+        ),
+    )
+
+
+# ============================================================
+# BUY
+# ============================================================
+
+@router.callback_query(
+    F.data == "user:buy"
+)
+async def user_buy(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "💳 <b>Купить подписку</b>\n\n"
+        "Выбери срок подписки:",
+        reply_markup=buy_keyboard(),
+    )
+
+
+# ============================================================
+# CREATE PAYMENT
+# ============================================================
+
+@router.callback_query(
+    F.data.startswith("buy:")
+)
+async def choose_tariff(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
 
     tariff_key = callback.data.split(
         ":",
@@ -547,123 +614,220 @@ async def buy_tariff(
     )
 
     if not tariff:
-
-        await callback.answer(
-            "Тариф не найден",
-            show_alert=True,
+        await callback.message.answer(
+            "❌ Тариф не найден."
         )
-
         return
 
-    payment = create_payment(
-        user_id=user_id,
-        tariff=tariff_key,
-        days=tariff["days"],
-        stars=tariff["stars"],
+    user_id = int(
+        callback.from_user.id
+    )
+
+    try:
+
+        payment_id = create_payment(
+            user_id=user_id,
+            tariff=tariff_key,
+            days=int(
+                tariff["days"]
+            ),
+            stars=int(
+                tariff["stars"]
+            ),
+        )
+
+    except TypeError:
+
+        payment_id = create_payment(
+            user_id,
+            tariff_key,
+            int(tariff["days"]),
+            int(tariff["stars"]),
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "create_payment error"
+        )
+
+        await callback.message.answer(
+            "❌ Не удалось создать платёж."
+        )
+        return
+
+    await callback.message.edit_text(
+        "💳 <b>Оплата подписки</b>\n\n"
+        f"Тариф: "
+        f"<b>{escape(str(tariff['title']))}</b>\n"
+        f"Срок: "
+        f"<b>{tariff['days']} дней</b>\n"
+        f"Стоимость: "
+        f"<b>⭐ {tariff['stars']}</b>\n\n"
+        f"Нажми кнопку ниже для оплаты.",
+        reply_markup=payment_keyboard(
+            payment_id
+        ),
+    )
+
+
+# ============================================================
+# TELEGRAM STARS PAYMENT
+# ============================================================
+
+@router.callback_query(
+    F.data.startswith("pay:")
+)
+async def pay_tariff(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    payment_id = int(
+        callback.data.split(
+            ":",
+            1,
+        )[1]
+    )
+
+    user_id = int(
+        callback.from_user.id
+    )
+
+    from database import get_payment
+
+    payment = get_payment(
+        payment_id
     )
 
     if not payment:
-
-        await callback.answer(
-            "Не удалось создать платёж",
-            show_alert=True,
+        await callback.message.answer(
+            "❌ Платёж не найден."
         )
-
         return
 
-    payment_id = payment["id"]
+    if int(
+        payment.get(
+            "user_id",
+            0,
+        )
+        or 0
+    ) != user_id:
+        await callback.message.answer(
+            "❌ Этот платёж принадлежит "
+            "другому пользователю."
+        )
+        return
 
-    payload = (
-        f"magnit:{payment_id}:{tariff_key}"
+    if payment.get(
+        "status"
+    ) == "completed":
+
+        await callback.message.answer(
+            "✅ Этот платёж уже оплачен."
+        )
+        return
+
+    tariff_key = payment.get(
+        "tariff"
     )
 
-    try:
+    tariff = TARIFFS.get(
+        tariff_key
+    )
 
-        await bot.send_invoice(
-            chat_id=user_id,
-            title=(
-                f"{SERVICE_NAME} — "
-                f"{tariff['title']}"
+    if not tariff:
+        await callback.message.answer(
+            "❌ Тариф не найден."
+        )
+        return
+
+    prices = [
+        LabeledPrice(
+            label=str(
+                tariff["title"]
             ),
-            description=(
-                f"Подписка {SERVICE_NAME} "
-                f"на {tariff['days']} дней."
+            amount=int(
+                tariff["stars"]
             ),
-            payload=payload,
-            currency="XTR",
-            prices=[
-                LabeledPrice(
-                    label=tariff["title"],
-                    amount=tariff["stars"],
-                )
-            ],
         )
+    ]
 
-        await callback.answer()
+    payload = (
+        f"magnit:"
+        f"{payment_id}:"
+        f"{tariff_key}"
+    )
 
-    except Exception as e:
-
-        logger.exception(
-            "Ошибка send_invoice: %s",
-            e,
-        )
-
-        await callback.answer(
-            "Не удалось создать счёт",
-            show_alert=True,
-        )
+    await bot.send_invoice(
+        chat_id=user_id,
+        title=(
+            f"{SERVICE_NAME} — "
+            f"{tariff['title']}"
+        ),
+        description=(
+            f"VPN-подписка "
+            f"на {tariff['days']} дней."
+        ),
+        payload=payload,
+        currency="XTR",
+        prices=prices,
+    )
 
 
 # ============================================================
-# PRE CHECKOUT
+# PRE-CHECKOUT
 # ============================================================
 
-@dp.pre_checkout_query()
-async def pre_checkout(
-    query: PreCheckoutQuery,
+@router.pre_checkout_query()
+async def process_pre_checkout(
+    query,
 ):
 
-    try:
-
-        await query.answer(
-            ok=True,
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "PreCheckout error: %s",
-            e,
-        )
+    await query.answer(
+        ok=True
+    )
 
 
 # ============================================================
 # SUCCESSFUL PAYMENT
 # ============================================================
 
-@dp.message(
+@router.message(
     F.successful_payment
 )
 async def successful_payment(
     message: Message,
 ):
 
-    payment = message.successful_payment
+    payment = (
+        message.successful_payment
+    )
 
-    payload = payment.invoice_payload
-
-    if not payload.startswith(
-        "magnit:"
-    ):
+    if not payment:
         return
 
-    parts = payload.split(":")
+    payload = (
+        payment.invoice_payload
+        or ""
+    )
 
-    if len(parts) != 3:
+    parts = payload.split(
+        ":"
+    )
+
+    if len(parts) < 3:
+        logger.error(
+            "Invalid payment payload: %s",
+            payload,
+        )
         return
 
     try:
-        payment_id = int(parts[1])
+        payment_id = int(
+            parts[1]
+        )
     except ValueError:
         return
 
@@ -676,70 +840,124 @@ async def successful_payment(
     if not tariff:
         return
 
-    telegram_charge_id = (
-        payment.telegram_payment_charge_id
+    user_id = int(
+        message.from_user.id
     )
 
-    completed = complete_payment(
-        payment_id=payment_id,
-        telegram_payment_charge_id=telegram_charge_id,
+    from database import (
+        complete_payment,
     )
-
-    if not completed:
-
-        await message.answer(
-            "⚠️ Платёж уже обработан "
-            "или не найден."
-        )
-
-        return
-
-    user = extend_subscription(
-        user_id=message.from_user.id,
-        days=tariff["days"],
-        tariff=tariff["title"],
-    )
-
-    if not user:
-
-        await message.answer(
-            "⚠️ Платёж получен, "
-            "но подписку не удалось обновить.\n\n"
-            "Обратитесь в поддержку."
-        )
-
-        return
 
     try:
-        ensure_subscription(
-            message.from_user.id
+
+        complete_payment(
+            payment_id,
+            payment.telegram_payment_charge_id,
         )
-    except Exception:
+
+    except TypeError:
+
+        complete_payment(
+            payment_id
+        )
+
+    except Exception as exc:
+
         logger.exception(
-            "Subscription sync error"
+            "complete_payment error: %s",
+            exc,
         )
 
-    until = user.get(
-        "subscription_until",
-        "—",
+    try:
+
+        extend_subscription(
+            user_id,
+            int(
+                tariff["days"]
+            ),
+            tariff_key,
+        )
+
+    except TypeError:
+
+        extend_subscription(
+            user_id,
+            int(
+                tariff["days"]
+            ),
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "extend_subscription error"
+        )
+
+        await message.answer(
+            "⚠️ Оплата прошла, "
+            "но произошла ошибка "
+            "при активации подписки.\n\n"
+            "Администратор уже получил "
+            "информацию об ошибке."
+        )
+        return
+
+    try:
+
+        ensure_subscription(
+            user_id
+        )
+
+    except Exception as exc:
+
+        logger.error(
+            "subscription sync error: %s",
+            exc,
+        )
+
+    user = get_user(
+        user_id
+    )
+
+    until = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        if user
+        else ""
     )
 
     try:
-        expires = format_date(until)
+        until_text = format_date(
+            until
+        )
     except Exception:
-        expires = str(until)
-
-    link = subscription_link(user)
+        until_text = until or "—"
 
     await message.answer(
-        "🎉 <b>ОПЛАТА УСПЕШНА!</b>\n\n"
-        f"📦 Тариф: <b>{tariff['title']}</b>\n"
-        f"📅 Действует до: <b>{expires}</b>\n\n"
-        f"🔗 <b>Ваша подписка:</b>\n"
-        f"<code>{escape(link)}</code>\n\n"
-        f"Добавьте эту ссылку в Happ.",
-        reply_markup=main_keyboard(
-            message.from_user.id
+        "🎉 <b>Оплата прошла успешно!</b>\n\n"
+        f"🧲 Тариф: "
+        f"<b>{escape(str(tariff['title']))}</b>\n"
+        f"📅 Срок: "
+        f"<b>{tariff['days']} дней</b>\n"
+        f"⏰ Действует до: "
+        f"<b>{escape(str(until_text))}</b>\n\n"
+        f"🔗 Твоя подписка:\n"
+        f"<code>{escape(get_raw_link(user_id))}</code>\n\n"
+        f"Можно открыть личный кабинет "
+        f"через кнопку ниже.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="👤 Личный кабинет",
+                        url=get_cabinet_link(
+                            user_id
+                        ),
+                    )
+                ]
+            ]
         ),
     )
 
@@ -748,82 +966,111 @@ async def successful_payment(
 # TRIAL
 # ============================================================
 
-@dp.callback_query(
+@router.callback_query(
     F.data == "user:trial"
 )
-async def trial(
+async def user_trial(
     callback: CallbackQuery,
 ):
 
-    user_id = callback.from_user.id
+    await callback.answer()
 
-    if is_blocked(user_id):
-
-        await callback.answer(
-            "Доступ заблокирован",
-            show_alert=True,
-        )
-
-        return
-
-    user = get_user(user_id)
-
-    if not user:
-
-        user = create_user(
-            user_id,
-            callback.from_user.username or "",
-            callback.from_user.first_name or "",
-        )
-
-    success = use_trial(
-        user_id,
-        TRIAL_DAYS,
+    user_id = int(
+        callback.from_user.id
     )
+
+    try:
+
+        success = use_trial(
+            user_id,
+            TRIAL_DAYS,
+        )
+
+    except TypeError:
+
+        success = use_trial(
+            user_id
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "use_trial error"
+        )
+
+        await callback.message.answer(
+            "❌ Не удалось активировать "
+            "пробный период."
+        )
+        return
 
     if not success:
 
-        await callback.answer(
-            "Пробный период уже использован",
-            show_alert=True,
+        await callback.message.edit_text(
+            "❌ <b>Пробный период недоступен.</b>\n\n"
+            "Возможно, ты уже использовал "
+            "пробный период или у тебя "
+            "есть активная подписка.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="💳 Купить подписку",
+                            callback_data="user:buy",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Назад",
+                            callback_data="user:menu",
+                        )
+                    ],
+                ]
+            ),
         )
-
         return
 
-    user = get_user(user_id)
-
     try:
-        ensure_subscription(user_id)
-    except Exception:
-        logger.exception(
-            "Trial sync error"
+        ensure_subscription(
+            user_id
+        )
+    except Exception as exc:
+        logger.error(
+            "trial sync error: %s",
+            exc,
         )
 
-    until = user.get(
-        "subscription_until"
+    user = get_user(
+        user_id
+    )
+
+    until = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        if user
+        else ""
     )
 
     try:
-        expires = format_date(until)
+        until_text = format_date(
+            until
+        )
     except Exception:
-        expires = str(until)
-
-    link = subscription_link(user)
+        until_text = until or "—"
 
     await callback.message.edit_text(
-        "🎁 <b>ПРОБНЫЙ ПЕРИОД АКТИВИРОВАН!</b>\n\n"
-        f"⏳ Срок: <b>{TRIAL_DAYS} дня</b>\n"
-        f"📅 До: <b>{expires}</b>\n\n"
-        f"🔗 Ваша ссылка:\n"
-        f"<code>{escape(link)}</code>\n\n"
-        "Добавьте её в Happ.",
-        reply_markup=back_to_menu_keyboard(
+        "🎁 <b>Пробный период активирован!</b>\n\n"
+        f"📅 Срок: "
+        f"<b>{TRIAL_DAYS} дней</b>\n"
+        f"⏰ До: "
+        f"<b>{escape(str(until_text))}</b>\n\n"
+        f"🔗 Подписка:\n"
+        f"<code>{escape(get_raw_link(user_id))}</code>",
+        reply_markup=cabinet_keyboard(
             user_id
         ),
-    )
-
-    await callback.answer(
-        "Пробный период активирован!",
     )
 
 
@@ -831,132 +1078,199 @@ async def trial(
 # PROMO
 # ============================================================
 
-promo_states = {}
-
-
-@dp.callback_query(
+@router.callback_query(
     F.data == "user:promo"
 )
-async def promo_start(
+async def user_promo(
     callback: CallbackQuery,
+    state: FSMContext,
 ):
-
-    user_id = callback.from_user.id
-
-    if is_blocked(user_id):
-
-        await callback.answer(
-            "Доступ заблокирован",
-            show_alert=True,
-        )
-
-        return
-
-    promo_states[user_id] = True
-
-    await callback.message.edit_text(
-        "🎟 <b>ПРОМОКОД</b>\n\n"
-        "Отправьте промокод сообщением.\n\n"
-        "Например:\n"
-        "<code>MAGNIT30</code>",
-        reply_markup=back_to_menu_keyboard(
-            user_id
-        ),
-    )
 
     await callback.answer()
 
+    await state.set_state(
+        PromoState.waiting_code
+    )
 
-@dp.message()
-async def user_text_handler(
-    message: Message,
+    await callback.message.edit_text(
+        "🎟 <b>Промокод</b>\n\n"
+        "Отправь промокод одним сообщением:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена",
+                        callback_data="promo:cancel",
+                    )
+                ]
+            ]
+        ),
+    )
+
+
+@router.callback_query(
+    F.data == "promo:cancel"
+)
+async def promo_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
 ):
 
-    user_id = message.from_user.id
+    await state.clear()
+    await callback.answer()
 
-    if user_id not in promo_states:
-        return
+    await callback.message.edit_text(
+        f"🧲 <b>{escape(SERVICE_NAME)}</b>\n\n"
+        "Главное меню 👇",
+        reply_markup=main_menu(
+            callback.from_user.id
+        ),
+    )
 
-    if is_blocked(user_id):
-        promo_states.pop(user_id, None)
-        return
+
+@router.message(
+    PromoState.waiting_code
+)
+async def process_promo(
+    message: Message,
+    state: FSMContext,
+):
 
     code = (
-        message.text or ""
-    ).strip().upper()
-
-    promo_states.pop(
-        user_id,
-        None,
-    )
+        message.text
+        or ""
+    ).strip()
 
     if not code:
-
         await message.answer(
-            "❌ Промокод пустой."
+            "❌ Введи промокод текстом."
         )
-
         return
 
-    days = use_promo(
-        code
+    user_id = int(
+        message.from_user.id
     )
 
-    if not days:
+    try:
+
+        result = use_promo(
+            user_id,
+            code,
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "use_promo error"
+        )
+
+        await state.clear()
+
+        await message.answer(
+            "❌ Ошибка при применении "
+            "промокода."
+        )
+        return
+
+    await state.clear()
+
+    if not result:
 
         await message.answer(
             "❌ <b>Промокод недействителен.</b>\n\n"
-            "Проверьте код и попробуйте ещё раз.",
-            reply_markup=main_keyboard(
+            "Проверь правильность написания.",
+            reply_markup=main_menu(
                 user_id
             ),
         )
-
         return
 
-    user = extend_subscription(
-        user_id,
-        days,
-        tariff=f"Промокод {code}",
-    )
+    if isinstance(
+        result,
+        dict,
+    ):
 
-    if not user:
+        days = int(
+            result.get(
+                "days",
+                0,
+            )
+            or 0
+        )
+
+    else:
+
+        try:
+            days = int(
+                result
+            )
+        except Exception:
+            days = 0
+
+    if days <= 0:
 
         await message.answer(
-            "❌ Не удалось активировать промокод.",
-            reply_markup=main_keyboard(
+            "❌ Промокод не дал дней подписки.",
+            reply_markup=main_menu(
                 user_id
             ),
         )
-
         return
 
     try:
-        ensure_subscription(user_id)
-    except Exception:
-        logger.exception(
-            "Promo sync error"
+
+        extend_subscription(
+            user_id,
+            days,
+            "promo",
         )
 
-    until = user.get(
-        "subscription_until"
+    except TypeError:
+
+        extend_subscription(
+            user_id,
+            days,
+        )
+
+    try:
+        ensure_subscription(
+            user_id
+        )
+    except Exception as exc:
+        logger.error(
+            "promo sync error: %s",
+            exc,
+        )
+
+    user = get_user(
+        user_id
+    )
+
+    until = (
+        user.get(
+            "subscription_until",
+            "",
+        )
+        if user
+        else ""
     )
 
     try:
-        expires = format_date(until)
+        until_text = format_date(
+            until
+        )
     except Exception:
-        expires = str(until)
-
-    link = subscription_link(user)
+        until_text = until or "—"
 
     await message.answer(
-        "🎉 <b>ПРОМОКОД АКТИВИРОВАН!</b>\n\n"
-        f"🎟 Код: <code>{escape(code)}</code>\n"
-        f"➕ Добавлено: <b>{days} дней</b>\n"
-        f"📅 Действует до: <b>{expires}</b>\n\n"
+        "🎉 <b>Промокод активирован!</b>\n\n"
+        f"➕ Начислено: "
+        f"<b>{days} дней</b>\n"
+        f"⏰ Подписка до: "
+        f"<b>{escape(str(until_text))}</b>\n\n"
         f"🔗 Подписка:\n"
-        f"<code>{escape(link)}</code>",
-        reply_markup=main_keyboard(
+        f"<code>{escape(get_raw_link(user_id))}</code>",
+        reply_markup=cabinet_keyboard(
             user_id
         ),
     )
@@ -966,102 +1280,66 @@ async def user_text_handler(
 # SUPPORT
 # ============================================================
 
-@dp.callback_query(
+@router.callback_query(
     F.data == "user:support"
 )
-async def support(
+async def user_support(
     callback: CallbackQuery,
 ):
 
-    username = (
-        TELEGRAM_USERNAME
-        .lstrip("@")
-    )
-
-    support_url = (
-        f"https://t.me/{username}"
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💬 Написать в поддержку",
-                    url=support_url,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="user:menu",
-                )
-            ],
-        ]
-    )
-
-    await callback.message.edit_text(
-        "🆘 <b>ПОДДЕРЖКА</b>\n\n"
-        "Если возникли проблемы с подпиской "
-        "или подключением — напишите нам.",
-        reply_markup=keyboard,
-    )
-
     await callback.answer()
 
+    username = TELEGRAM_USERNAME
 
-# ============================================================
-# BLOCK CHECK FOR TEXT COMMANDS
-# ============================================================
-
-@dp.message(
-    F.text == "/cabinet"
-)
-async def cabinet_command(
-    message: Message,
-):
-
-    if is_blocked(message.from_user.id):
-
-        await message.answer(
-            "🚫 Доступ заблокирован."
+    if username:
+        support_text = (
+            f"🆘 <b>Поддержка {escape(SERVICE_NAME)}</b>\n\n"
+            f"Если возникли проблемы с VPN, "
+            f"напиши администратору.\n\n"
+            f"👤 @{escape(username)}"
         )
 
-        return
-
-    user = get_user(
-        message.from_user.id
-    )
-
-    if not user:
-
-        user = create_user(
-            message.from_user.id,
-            message.from_user.username or "",
-            message.from_user.first_name or "",
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💬 Написать администратору",
+                        url=(
+                            f"https://t.me/"
+                            f"{username}"
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data="user:menu",
+                    )
+                ],
+            ]
         )
 
-    active = is_active(user)
+    else:
 
-    status = (
-        "🟢 Активна"
-        if active
-        else "🔴 Неактивна"
-    )
+        support_text = (
+            "🆘 <b>Поддержка</b>\n\n"
+            "Обратись к администратору."
+        )
 
-    until = user.get(
-        "subscription_until"
-    ) or "—"
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data="user:menu",
+                    )
+                ]
+            ]
+        )
 
-    link = subscription_link(user)
-
-    await message.answer(
-        f"👤 <b>ЛИЧНЫЙ КАБИНЕТ</b>\n\n"
-        f"📊 Статус: <b>{status}</b>\n"
-        f"📅 До: <b>{escape(str(until))}</b>\n\n"
-        f"🔗 <code>{escape(link)}</code>",
-        reply_markup=main_keyboard(
-            message.from_user.id
-        ),
+    await callback.message.edit_text(
+        support_text,
+        reply_markup=keyboard,
     )
 
 
@@ -1074,13 +1352,22 @@ async def expiration_loop():
     while True:
 
         try:
-            expire_old_subscriptions()
 
-        except Exception as e:
+            expired = (
+                expire_old_subscriptions()
+            )
 
-            logger.exception(
-                "Expiration loop error: %s",
-                e,
+            if expired:
+                logger.info(
+                    "Expired subscriptions: %s",
+                    expired,
+                )
+
+        except Exception as exc:
+
+            logger.error(
+                "expiration loop error: %s",
+                exc,
             )
 
         await asyncio.sleep(
@@ -1089,124 +1376,70 @@ async def expiration_loop():
 
 
 # ============================================================
-# WEB SERVER
-# ============================================================
-
-def run_web_server():
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000",
-        )
-    )
-
-    logger.info(
-        "Web server starting on port %s",
-        port,
-    )
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-    )
-
-
-# ============================================================
 # STARTUP
 # ============================================================
 
-async def main():
+async def on_startup():
 
     logger.info(
         "Starting %s...",
         SERVICE_NAME,
     )
 
-    # DB
     init_db()
 
-    # Web
-    web_thread = threading.Thread(
-        target=run_web_server,
-        daemon=True,
-        name="web-server",
-    )
-
-    web_thread.start()
-
-    # Auto subscription sync
     try:
         start_auto_sync()
-
-        logger.info(
-            "Auto sync started"
+    except Exception as exc:
+        logger.error(
+            "Auto sync start error: %s",
+            exc,
         )
 
-    except Exception as e:
-
-        logger.exception(
-            "Auto sync error: %s",
-            e,
-        )
-
-    # Expiration checker
     asyncio.create_task(
         expiration_loop()
     )
 
-    # Remove old webhook
-    try:
-
-        await bot.delete_webhook(
-            drop_pending_updates=True
-        )
-
-    except Exception as e:
-
-        logger.warning(
-            "delete_webhook error: %s",
-            e,
-        )
-
     logger.info(
-        "Bot polling started"
+        "%s started successfully",
+        SERVICE_NAME,
     )
+
+
+# ============================================================
+# ROUTER
+# ============================================================
+
+dp.include_router(
+    router
+)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    await on_startup()
 
     await dp.start_polling(
-        bot
+        bot,
+        allowed_updates=dp.resolve_used_update_types(),
     )
 
-
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
 
-    # Admin router должен быть подключён
-    # до запуска polling.
-    dp.include_router(
-        admin_router
-    )
-
     try:
-
         asyncio.run(
             main()
         )
 
-    except KeyboardInterrupt:
-
+    except (
+        KeyboardInterrupt,
+        SystemExit,
+    ):
         logger.info(
             "Bot stopped"
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Fatal error: %s",
-            e
         )
