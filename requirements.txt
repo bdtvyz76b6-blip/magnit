@@ -2,3 +2,4 @@ aiogram
 fastapi
 uvicorn
 python-dotenv
+requests
